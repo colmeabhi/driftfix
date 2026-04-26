@@ -1,0 +1,5 @@
+aws_region               = "us-east-1"
+project                  = "drift-detector"
+saas_account_id          = "274024437845"
+external_id              = "change-me-random-string"
+saas_eventbridge_bus_arn = "arn:aws:events:us-east-1:274024437845:event-bus/drift-detector-bus"

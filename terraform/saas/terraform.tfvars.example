@@ -1,0 +1,14 @@
+aws_region        = "us-east-1"
+project           = "drift-detector"
+lambda_zip_bucket = "my-lambda-zips-bucket"
+
+# github_token_secret_arn = "arn:aws:secretsmanager:us-east-1:274024437845:secret/drift-detector/github-token-XXXXXX"
+# bedrock_model_id = ""  # fill in once decided
+
+tenants = {
+  "customer-acme" = {
+    role_arn    = "arn:aws:iam::CUSTOMER_ACCOUNT_ID:role/drift-detector-cross-account"
+    external_id = "acme-external-id-change-me"
+    github_repo = "acme-org/infra-repo"
+  }
+}

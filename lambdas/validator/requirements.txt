@@ -1,0 +1,3 @@
+boto3>=1.34.0
+cfn-lint>=0.86.0
+PyYAML>=6.0
