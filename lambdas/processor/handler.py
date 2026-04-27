@@ -1,86 +1,94 @@
 """
-Processor Lambda
+Orchestrator Lambda — Batch Mode
 
-Triggered by SQS. For each CloudTrail write event:
-1. Looks up the tenant config in DynamoDB
-2. Assumes the customer's cross-account role via STS
-3. Fetches the relevant CloudFormation template from the customer account
-4. Calls Bedrock to generate an updated template reflecting the drift
-5. Invokes the Validator Lambda with the generated template
+Triggered by EventBridge schedule (daily at 7 AM UTC).
+For each tenant:
+  1. Assumes cross-account role via STS
+  2. Lists CloudTrail log files from last 24h from the customer's S3 bucket
+  3. Parses + filters write events
+  4. Deduplicates against reconciliations table (prevents reprocessing on retry)
+  5. Groups new events by stack via tag-based resolver
+  6. Invokes one Stack Processor Lambda per stack (async — runs in parallel)
 """
 
+import gzip
 import json
-import os
-import boto3
 import logging
+import os
+from datetime import datetime, timedelta, timezone
+
+import boto3
+
+from stack_resolver import resolve_stack_name
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 dynamodb = boto3.resource("dynamodb")
-sts = boto3.client("sts")
+sts_client = boto3.client("sts")
 lambda_client = boto3.client("lambda")
 
 TENANTS_TABLE = os.environ["DYNAMODB_TENANTS_TABLE"]
 RECONCILIATIONS_TABLE = os.environ["DYNAMODB_RECONCILIATIONS_TABLE"]
-AUDIT_BUCKET = os.environ["AUDIT_BUCKET"]
-BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "")
-VALIDATOR_FUNCTION_NAME = os.environ["VALIDATOR_FUNCTION_NAME"]
+STACK_PROCESSOR_FUNCTION_NAME = os.environ["STACK_PROCESSOR_FUNCTION_NAME"]
+
+WRITE_PREFIXES = ("Create", "Update", "Delete", "Put", "Modify", "Attach", "Detach", "Associate", "Disassociate")
 
 
 def lambda_handler(event, context):
-    batch_item_failures = []
-
-    for record in event["Records"]:
+    tenants = list_tenants()
+    logger.info("Batch run starting — %d tenant(s)", len(tenants))
+    for tenant in tenants:
         try:
-            process_record(record)
+            process_tenant(tenant)
         except Exception as e:
-            logger.error("Failed to process record %s: %s", record["messageId"], e)
-            batch_item_failures.append({"itemIdentifier": record["messageId"]})
-
-    return {"batchItemFailures": batch_item_failures}
+            logger.error("Failed to process tenant %s: %s", tenant.get("tenant_id"), e)
 
 
-def process_record(record):
-    body = json.loads(record["body"])
-    cloudtrail_event = extract_cloudtrail_event(body)
-
-    tenant_id = resolve_tenant_id(cloudtrail_event)
-    event_id = cloudtrail_event.get("eventID", record["messageId"])
-
-    logger.info("Processing event %s for tenant %s", event_id, tenant_id)
-
-    tenant = get_tenant(tenant_id)
-    temp_creds = assume_cross_account_role(tenant["role_arn"], tenant["external_id"], event_id)
-    cfn_template = fetch_cfn_template(temp_creds, cloudtrail_event)
-    updated_template = invoke_bedrock(cfn_template, cloudtrail_event)
-
-    invoke_validator(tenant_id, event_id, updated_template, cfn_template, cloudtrail_event, tenant)
-
-
-def extract_cloudtrail_event(sqs_body):
-    # EventBridge wraps the original SNS/S3 notification; unwrap to the CloudTrail record
-    detail = sqs_body.get("detail", sqs_body)
-    return detail
-
-
-def resolve_tenant_id(cloudtrail_event):
-    # TODO: implement tenant resolution logic (e.g. by account ID in the event)
-    account_id = cloudtrail_event.get("recipientAccountId") or cloudtrail_event.get("userIdentity", {}).get("accountId")
-    return account_id
-
-
-def get_tenant(tenant_id):
+def list_tenants():
     table = dynamodb.Table(TENANTS_TABLE)
-    resp = table.get_item(Key={"tenant_id": tenant_id})
-    item = resp.get("Item")
-    if not item:
-        raise ValueError(f"Unknown tenant: {tenant_id}")
-    return item
+    items = []
+    kwargs = {}
+    while True:
+        resp = table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        start_key = resp.get("LastEvaluatedKey")
+        if not start_key:
+            break
+        kwargs["ExclusiveStartKey"] = start_key
+    return items
+
+
+def process_tenant(tenant):
+    tenant_id = tenant["tenant_id"]
+    creds = assume_cross_account_role(tenant["role_arn"], tenant["external_id"], tenant_id)
+
+    log_keys = list_cloudtrail_logs(creds, tenant["cloudtrail_bucket"])
+    logger.info("Tenant %s — %d log file(s) in last 24h", tenant_id, len(log_keys))
+
+    all_write_events = []
+    for key in log_keys:
+        try:
+            records = parse_log_file(creds, tenant["cloudtrail_bucket"], key)
+            all_write_events.extend(r for r in records if is_write_event(r))
+        except Exception as e:
+            logger.error("Tenant %s — failed parsing %s: %s", tenant_id, key, e)
+
+    new_events = filter_already_processed(tenant_id, all_write_events)
+    logger.info("Tenant %s — %d new write event(s) after dedup", tenant_id, len(new_events))
+    if not new_events:
+        return
+
+    stack_events = group_events_by_stack(creds, new_events)
+    logger.info("Tenant %s — %d unique stack(s) affected", tenant_id, len(stack_events))
+
+    for stack_name, events in stack_events.items():
+        mark_events_queued(tenant_id, events)
+        invoke_stack_processor(tenant, stack_name, events)
 
 
 def assume_cross_account_role(role_arn, external_id, session_name):
-    resp = sts.assume_role(
+    resp = sts_client.assume_role(
         RoleArn=role_arn,
         RoleSessionName=f"drift-{session_name[:32]}",
         ExternalId=external_id,
@@ -89,42 +97,96 @@ def assume_cross_account_role(role_arn, external_id, session_name):
     return resp["Credentials"]
 
 
-def fetch_cfn_template(creds, cloudtrail_event):
-    cfn = boto3.client(
-        "cloudformation",
+def list_cloudtrail_logs(creds, bucket):
+    s3 = _s3_client(creds)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    keys = []
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix="AWSLogs/"):
+        for obj in page.get("Contents", []):
+            if obj["LastModified"] >= cutoff and obj["Key"].endswith(".json.gz"):
+                keys.append(obj["Key"])
+    return keys
+
+
+def parse_log_file(creds, bucket, key):
+    s3 = _s3_client(creds)
+    resp = s3.get_object(Bucket=bucket, Key=key)
+    data = json.loads(gzip.decompress(resp["Body"].read()))
+    return data.get("Records", [])
+
+
+def is_write_event(event):
+    if event.get("readOnly", False):
+        return False
+    return event.get("eventName", "").startswith(WRITE_PREFIXES)
+
+
+def filter_already_processed(tenant_id, events):
+    if not events:
+        return []
+
+    client = dynamodb.meta.client
+    existing_ids = set()
+    keys = [{"tenant_id": {"S": tenant_id}, "event_id": {"S": e["eventID"]}} for e in events]
+
+    # BatchGetItem accepts max 100 keys per call
+    for i in range(0, len(keys), 100):
+        resp = client.batch_get_item(
+            RequestItems={
+                RECONCILIATIONS_TABLE: {
+                    "Keys": keys[i:i + 100],
+                    "ProjectionExpression": "event_id",
+                }
+            }
+        )
+        for item in resp["Responses"].get(RECONCILIATIONS_TABLE, []):
+            existing_ids.add(item["event_id"]["S"])
+
+    return [e for e in events if e["eventID"] not in existing_ids]
+
+
+def group_events_by_stack(creds, events):
+    stacks = {}
+    for event in events:
+        try:
+            stack_name = resolve_stack_name(creds, event)
+            stacks.setdefault(stack_name, []).append(event)
+        except ValueError as e:
+            logger.warning("Skipping event %s: %s", event.get("eventID"), e)
+    return stacks
+
+
+def mark_events_queued(tenant_id, events):
+    table = dynamodb.Table(RECONCILIATIONS_TABLE)
+    now = datetime.now(timezone.utc).isoformat()
+    with table.batch_writer() as batch:
+        for event in events:
+            batch.put_item(Item={
+                "tenant_id": tenant_id,
+                "event_id": event["eventID"],
+                "status": "queued",
+                "queued_at": now,
+            })
+
+
+def invoke_stack_processor(tenant, stack_name, events):
+    payload = {
+        "tenant": tenant,
+        "stack_name": stack_name,
+        "cloudtrail_events": events,
+    }
+    lambda_client.invoke(
+        FunctionName=STACK_PROCESSOR_FUNCTION_NAME,
+        InvocationType="Event",
+        Payload=json.dumps(payload, default=str),
+    )
+
+
+def _s3_client(creds):
+    return boto3.client(
+        "s3",
         aws_access_key_id=creds["AccessKeyId"],
         aws_secret_access_key=creds["SecretAccessKey"],
         aws_session_token=creds["SessionToken"],
-    )
-    # TODO: determine which stack the event belongs to
-    stack_name = cloudtrail_event.get("requestParameters", {}).get("stackName", "")
-    if not stack_name:
-        raise ValueError("Could not determine affected CloudFormation stack from event")
-
-    resp = cfn.get_template(StackName=stack_name, TemplateStage="Original")
-    return resp["TemplateBody"]
-
-
-def invoke_bedrock(cfn_template, cloudtrail_event):
-    if not BEDROCK_MODEL_ID:
-        raise NotImplementedError("BEDROCK_MODEL_ID is not configured yet")
-
-    # TODO: implement Bedrock call once model is decided
-    raise NotImplementedError("Bedrock integration not yet implemented")
-
-
-def invoke_validator(tenant_id, event_id, updated_template, original_template, cloudtrail_event, tenant):
-    payload = {
-        "tenant_id": tenant_id,
-        "event_id": event_id,
-        "updated_template": updated_template,
-        "original_template": original_template,
-        "cloudtrail_event": cloudtrail_event,
-        "github_repo": tenant.get("github_repo", ""),
-        "retry_count": 0,
-    }
-    lambda_client.invoke(
-        FunctionName=VALIDATOR_FUNCTION_NAME,
-        InvocationType="Event",  # async
-        Payload=json.dumps(payload),
     )

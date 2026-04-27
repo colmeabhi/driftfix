@@ -6,13 +6,13 @@ set -euo pipefail
 BUCKET="${1:?Usage: $0 <s3-bucket-name>}"
 LAMBDAS_DIR="$(dirname "$0")/../lambdas"
 
-for fn in processor validator pr_creator; do
+for fn in processor stack_processor validator pr_creator; do
     echo "==> Packaging $fn"
     dir="$LAMBDAS_DIR/$fn"
     tmp=$(mktemp -d)
 
     pip3 install -r "$dir/requirements.txt" -t "$tmp" -q
-    cp "$dir/handler.py" "$tmp/"
+    cp "$dir"/*.py "$tmp/"
 
     zip_path="/tmp/${fn}.zip"
     (cd "$tmp" && zip -r "$zip_path" . -q)

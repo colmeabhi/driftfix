@@ -18,9 +18,10 @@ variable "project" {
 # the customer created during onboarding.
 variable "tenants" {
   type = map(object({
-    role_arn    = string
-    external_id = string
-    github_repo = string # "owner/repo"
+    role_arn           = string
+    external_id        = string
+    github_repo        = string # "owner/repo"
+    cloudtrail_bucket  = string # S3 bucket name in the customer account
   }))
   default = {}
 }
@@ -29,12 +30,6 @@ variable "github_token_secret_arn" {
   description = "ARN of the Secrets Manager secret holding the GitHub personal access token"
   type        = string
   default     = ""
-}
-
-variable "allowed_customer_account_ids" {
-  description = "AWS account IDs of onboarded customers allowed to put events onto the SaaS EventBridge bus"
-  type        = list(string)
-  default     = []
 }
 
 variable "bedrock_model_id" {

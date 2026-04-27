@@ -18,7 +18,3 @@ variable "external_id" {
   type = string
 }
 
-# ARN of the EventBridge bus in the SaaS account where events will be forwarded
-variable "saas_eventbridge_bus_arn" {
-  type = string
-}

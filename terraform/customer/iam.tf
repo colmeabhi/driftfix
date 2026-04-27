@@ -38,11 +38,31 @@ resource "aws_iam_role_policy" "cross_account_read" {
         Resource = "*"
       },
       {
+        Sid    = "ResolveTags"
+        Effect = "Allow"
+        Action = [
+          "s3:GetBucketTagging",
+          "ec2:DescribeTags",
+          "rds:DescribeDBInstances",
+          "rds:DescribeDBClusters",
+          "rds:ListTagsForResource",
+          "lambda:GetFunction",
+          "lambda:ListTags",
+          "iam:ListRoleTags",
+          "sns:ListTagsForResource",
+          "sqs:ListQueueTags",
+          "dynamodb:DescribeTable",
+          "dynamodb:ListTagsOfResource"
+        ]
+        Resource = "*"
+      },
+      {
         Sid    = "ReadCloudTrailLogs"
         Effect = "Allow"
         Action = [
           "s3:GetObject",
-          "s3:ListBucket"
+          "s3:ListBucket",
+          "s3:ListObjectsV2"
         ]
         Resource = [
           aws_s3_bucket.cloudtrail.arn,

@@ -11,7 +11,7 @@ data "aws_iam_policy_document" "lambda_assume" {
   }
 }
 
-# ── Processor Lambda ─────────────────────────────────────────────────────────
+# ── Orchestrator (Processor) Lambda ──────────────────────────────────────────
 resource "aws_iam_role" "processor" {
   name               = "${var.project}-processor"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
@@ -29,16 +29,48 @@ resource "aws_iam_role_policy" "processor" {
         Resource = "arn:aws:logs:*:*:*"
       },
       {
-        Sid      = "SQSConsume"
+        Sid      = "STSAssume"
         Effect   = "Allow"
-        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
-        Resource = aws_sqs_queue.drift_events.arn
+        Action   = ["sts:AssumeRole"]
+        Resource = "*"
+      },
+      {
+        Sid    = "DynamoDB"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:Scan",
+          "dynamodb:BatchGetItem",
+          "dynamodb:PutItem",
+          "dynamodb:BatchWriteItem"
+        ]
+        Resource = [aws_dynamodb_table.reconciliations.arn, aws_dynamodb_table.tenants.arn]
+      }
+    ]
+  })
+}
+
+# ── Stack Processor Lambda ────────────────────────────────────────────────────
+resource "aws_iam_role" "stack_processor" {
+  name               = "${var.project}-stack-processor"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "stack_processor" {
+  role = aws_iam_role.stack_processor.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "Logs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "arn:aws:logs:*:*:*"
       },
       {
         Sid      = "STSAssume"
         Effect   = "Allow"
         Action   = ["sts:AssumeRole"]
-        Resource = "*" # scoped at runtime to per-tenant role ARN
+        Resource = "*"
       },
       {
         Sid      = "Bedrock"
@@ -49,14 +81,8 @@ resource "aws_iam_role_policy" "processor" {
       {
         Sid      = "DynamoDB"
         Effect   = "Allow"
-        Action   = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"]
-        Resource = [aws_dynamodb_table.reconciliations.arn, aws_dynamodb_table.tenants.arn]
-      },
-      {
-        Sid      = "S3Audit"
-        Effect   = "Allow"
-        Action   = ["s3:PutObject"]
-        Resource = "${aws_s3_bucket.audit.arn}/*"
+        Action   = ["dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.reconciliations.arn
       }
     ]
   })

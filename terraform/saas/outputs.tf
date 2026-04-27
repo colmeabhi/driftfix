@@ -1,15 +1,15 @@
-output "eventbridge_bus_arn" {
-  value = aws_cloudwatch_event_bus.main.arn
+output "processor_dlq_url" {
+  value = aws_sqs_queue.processor_dlq.url
 }
 
-output "sqs_queue_url" {
-  value = aws_sqs_queue.drift_events.url
+output "dynamodb_tenants_table" {
+  value = aws_dynamodb_table.tenants.name
 }
 
-output "sqs_dlq_url" {
-  value = aws_sqs_queue.drift_events_dlq.url
-}
-
-output "dynamodb_table_name" {
+output "dynamodb_reconciliations_table" {
   value = aws_dynamodb_table.reconciliations.name
+}
+
+output "audit_bucket" {
+  value = aws_s3_bucket.audit.bucket
 }
