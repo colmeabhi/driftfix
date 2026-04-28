@@ -3,7 +3,7 @@ project           = "drift-detector"
 lambda_zip_bucket = "my-lambda-zips-bucket"
 
 # github_token_secret_arn = "arn:aws:secretsmanager:us-east-1:274024437845:secret/drift-detector/github-token-XXXXXX"
-# bedrock_model_id = ""  # fill in once decided
+# bedrock_model_id = "google.gemma-3-4b-it"  # fill in once decided
 
 tenants = {
   "customer-acme" = {
