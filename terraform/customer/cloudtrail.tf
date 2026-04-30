@@ -45,7 +45,7 @@ resource "aws_cloudtrail" "main" {
   enable_log_file_validation    = true
 
   advanced_event_selector {
-    name = "Write-only management events"
+    name = "Log write-only management events"
 
     field_selector {
       field  = "eventCategory"
