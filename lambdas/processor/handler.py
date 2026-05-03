@@ -18,6 +18,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 
 from stack_resolver import resolve_stack_name
 
@@ -126,24 +127,33 @@ def filter_already_processed(tenant_id, events):
     if not events:
         return []
 
-    client = dynamodb.meta.client
+    # Drop any records missing a string eventID — malformed CloudTrail entries
+    valid = [e for e in events if isinstance(e.get("eventID"), str)]
+    if not valid:
+        return []
+
     existing_ids = set()
-    keys = [{"tenant_id": {"S": tenant_id}, "event_id": {"S": e["eventID"]}} for e in events]
 
-    # BatchGetItem accepts max 100 keys per call
-    for i in range(0, len(keys), 100):
-        resp = client.batch_get_item(
-            RequestItems={
-                RECONCILIATIONS_TABLE: {
-                    "Keys": keys[i:i + 100],
-                    "ProjectionExpression": "event_id",
+    for i in range(0, len(valid), 100):
+        chunk = valid[i:i + 100]
+        try:
+            resp = dynamodb.batch_get_item(
+                RequestItems={
+                    RECONCILIATIONS_TABLE: {
+                        "Keys": [
+                            {"tenant_id": tenant_id, "event_id": e["eventID"]}
+                            for e in chunk
+                        ],
+                        "ProjectionExpression": "event_id",
+                    }
                 }
-            }
-        )
-        for item in resp["Responses"].get(RECONCILIATIONS_TABLE, []):
-            existing_ids.add(item["event_id"]["S"])
+            )
+            for item in resp["Responses"].get(RECONCILIATIONS_TABLE, []):
+                existing_ids.add(item["event_id"])
+        except Exception as ex:
+            logger.warning("BatchGetItem chunk %d failed, treating as unprocessed: %s", i // 100, ex)
 
-    return [e for e in events if e["eventID"] not in existing_ids]
+    return [e for e in valid if e["eventID"] not in existing_ids]
 
 
 def group_events_by_stack(creds, events):
@@ -152,7 +162,7 @@ def group_events_by_stack(creds, events):
         try:
             stack_name = resolve_stack_name(creds, event)
             stacks.setdefault(stack_name, []).append(event)
-        except ValueError as e:
+        except (ValueError, ClientError) as e:
             logger.warning("Skipping event %s: %s", event.get("eventID"), e)
     return stacks
 

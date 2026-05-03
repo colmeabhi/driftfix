@@ -11,7 +11,12 @@ for fn in processor stack_processor validator pr_creator; do
     dir="$LAMBDAS_DIR/$fn"
     tmp=$(mktemp -d)
 
-    pip3 install -r "$dir/requirements.txt" -t "$tmp" -q
+    pip3 install -r "$dir/requirements.txt" -t "$tmp" -q \
+        --platform manylinux2014_x86_64 \
+        --implementation cp \
+        --python-version 3.12 \
+        --only-binary :all: \
+        --upgrade
     cp "$dir"/*.py "$tmp/"
 
     zip_path="/tmp/${fn}.zip"

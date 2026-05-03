@@ -44,6 +44,12 @@ resource "aws_iam_role_policy" "processor" {
           "dynamodb:BatchWriteItem"
         ]
         Resource = [aws_dynamodb_table.reconciliations.arn, aws_dynamodb_table.tenants.arn]
+      },
+      {
+        Sid      = "DLQ"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = aws_sqs_queue.processor_dlq.arn
       }
     ]
   })
@@ -83,6 +89,19 @@ resource "aws_iam_role_policy" "stack_processor" {
         Effect   = "Allow"
         Action   = ["dynamodb:UpdateItem"]
         Resource = aws_dynamodb_table.reconciliations.arn
+      },
+      {
+        Sid      = "DLQ"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = aws_sqs_queue.processor_dlq.arn
+      },
+      {
+        # INTERIM: Gemini API key access — remove when switching to Bedrock
+        Sid      = "GeminiSecret"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = "arn:aws:secretsmanager:*:${data.aws_caller_identity.current.account_id}:secret:${var.project}/gemini-*"
       }
     ]
   })

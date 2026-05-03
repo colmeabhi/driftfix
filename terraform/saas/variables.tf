@@ -38,6 +38,13 @@ variable "bedrock_model_id" {
   default     = ""
 }
 
+# INTERIM: Remove this variable when switching to Bedrock
+variable "gemini_api_key_secret_arn" {
+  description = "ARN of the Secrets Manager secret holding the Gemini API key (interim — replace with Bedrock)"
+  type        = string
+  default     = ""
+}
+
 variable "lambda_zip_bucket" {
   description = "S3 bucket where Lambda deployment packages are uploaded by scripts/package_lambdas.sh"
   type        = string

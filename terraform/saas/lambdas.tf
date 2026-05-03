@@ -57,6 +57,8 @@ resource "aws_lambda_function" "stack_processor" {
       DYNAMODB_RECONCILIATIONS_TABLE = aws_dynamodb_table.reconciliations.name
       BEDROCK_MODEL_ID               = var.bedrock_model_id
       VALIDATOR_FUNCTION_NAME        = aws_lambda_function.validator.function_name
+      # INTERIM: Gemini key secret — remove when switching to Bedrock
+      GEMINI_API_KEY_SECRET_ARN      = var.gemini_api_key_secret_arn
     }
   }
 }
