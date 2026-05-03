@@ -125,27 +125,43 @@ def invoke_bedrock(cfn_template, cloudtrail_events):
             raw = resp["body"].read()
             data = json.loads(raw)
 
+
+
             # Try to extract the model's text response
             model_text = None
 
-            # Common pattern: {"output": "..."} or {"content": "..."}
-            if isinstance(data, dict) and isinstance(data.get("output"), str):
+            if (
+                isinstance(data, dict)
+                and isinstance(data.get("choices"), list)
+                and data["choices"]
+                and isinstance(data["choices"][0], dict)
+            ):
+                message = data["choices"][0].get("message", {})
+                if isinstance(message, dict) and isinstance(message.get("content"), str):
+                    model_text = message["content"]
+
+            elif isinstance(data, dict) and isinstance(data.get("output"), str):
                 model_text = data["output"]
+
             elif isinstance(data, dict) and isinstance(data.get("content"), str):
                 model_text = data["content"]
-            # Some providers use: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
+
             elif isinstance(data, dict) and isinstance(data.get("candidates"), list) and data["candidates"]:
                 cand = data["candidates"][0]
-                parts = (
-                    cand.get("content", {}).get("parts", [])
-                    if isinstance(cand, dict) else []
-                )
+                parts = cand.get("content", {}).get("parts", []) if isinstance(cand, dict) else []
                 if parts and isinstance(parts[0], dict) and isinstance(parts[0].get("text"), str):
                     model_text = parts[0]["text"]
 
             if not model_text:
-                # Fall back: treat whole response as text
-                model_text = json.dumps(data)
+                raise RuntimeError(f"Could not extract model text from Bedrock response: {json.dumps(data)[:1000]}")
+
+            model_text = model_text.strip()
+            if model_text.startswith("```json"):
+                model_text = model_text[len("```json"):].strip()
+            if model_text.startswith("```"):
+                model_text = model_text[len("```"):].strip()
+            if model_text.endswith("```"):
+                model_text = model_text[:-3].strip()
 
             result = json.loads(model_text)
 
