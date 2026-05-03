@@ -45,21 +45,28 @@ def resolve_stack_name(creds, cloudtrail_event):
 
 def _s3_tags(creds, params, region):
     bucket = params.get("bucketName")
+    if not bucket:
+        raise ValueError("S3 event missing bucketName in requestParameters")
     s3 = boto3.client("s3", **_kwargs(creds))
     try:
         resp = s3.get_bucket_tagging(Bucket=bucket)
         return {t["Key"]: t["Value"] for t in resp.get("TagSet", [])}
     except ClientError as e:
-        if e.response["Error"]["Code"] == "NoSuchTagSet":
+        code = e.response["Error"]["Code"]
+        if code == "NoSuchTagSet":
             return {}
+        if code in ("NoSuchBucket", "AccessDenied", "NoSuchBucketPolicy"):
+            raise ValueError(f"S3 bucket '{bucket}' not accessible ({code}) — skipping")
         raise
 
 
 def _ec2_tags(creds, params, region):
     # EC2 events carry different ID fields depending on the API call.
+    # CreateTags stores targets in resourcesSet.items[].resourceId.
     resource_id = (
         params.get("instanceId")
         or _dig(params, "instancesSet", "items", 0, "instanceId")
+        or _dig(params, "resourcesSet", "items", 0, "resourceId")
         or params.get("groupId")
         or params.get("subnetId")
         or params.get("vpcId")
@@ -76,6 +83,8 @@ def _ec2_tags(creds, params, region):
 
 def _rds_tags(creds, params, region):
     db_id = params.get("dBInstanceIdentifier") or params.get("dBClusterIdentifier")
+    if not db_id:
+        raise ValueError(f"RDS event missing DB identifier in requestParameters: {list(params)}")
     rds = boto3.client("rds", region_name=region, **_kwargs(creds))
 
     if params.get("dBClusterIdentifier"):
@@ -91,6 +100,8 @@ def _rds_tags(creds, params, region):
 
 def _lambda_tags(creds, params, region):
     func_name = params.get("functionName")
+    if not func_name:
+        raise ValueError(f"Lambda event missing functionName in requestParameters: {list(params)}")
     lmb = boto3.client("lambda", region_name=region, **_kwargs(creds))
     resp = lmb.get_function(FunctionName=func_name)
     arn = resp["Configuration"]["FunctionArn"]
@@ -100,6 +111,8 @@ def _lambda_tags(creds, params, region):
 def _iam_tags(creds, params, region):
     # IAM is global — region param unused.
     role_name = params.get("roleName")
+    if not role_name:
+        raise ValueError(f"IAM event missing roleName in requestParameters: {list(params)}")
     iam = boto3.client("iam", **_kwargs(creds))
     resp = iam.list_role_tags(RoleName=role_name)
     return {t["Key"]: t["Value"] for t in resp.get("Tags", [])}
@@ -107,6 +120,8 @@ def _iam_tags(creds, params, region):
 
 def _sns_tags(creds, params, region):
     topic_arn = params.get("topicArn")
+    if not topic_arn:
+        raise ValueError(f"SNS event missing topicArn in requestParameters: {list(params)}")
     sns = boto3.client("sns", region_name=region, **_kwargs(creds))
     resp = sns.list_tags_for_resource(ResourceArn=topic_arn)
     return {t["Key"]: t["Value"] for t in resp.get("Tags", [])}
@@ -114,12 +129,16 @@ def _sns_tags(creds, params, region):
 
 def _sqs_tags(creds, params, region):
     queue_url = params.get("queueUrl")
+    if not queue_url:
+        raise ValueError(f"SQS event missing queueUrl in requestParameters: {list(params)}")
     sqs = boto3.client("sqs", region_name=region, **_kwargs(creds))
     return sqs.list_queue_tags(QueueUrl=queue_url).get("Tags", {})
 
 
 def _dynamodb_tags(creds, params, region):
     table_name = params.get("tableName")
+    if not table_name:
+        raise ValueError(f"DynamoDB event missing tableName in requestParameters: {list(params)}")
     ddb = boto3.client("dynamodb", region_name=region, **_kwargs(creds))
     # Need the ARN to call list_tags_of_resource.
     desc = ddb.describe_table(TableName=table_name)
