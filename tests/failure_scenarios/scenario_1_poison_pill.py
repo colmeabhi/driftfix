@@ -69,16 +69,42 @@ DLQ_NAME     = "drift-detector-processor-dlq"
 # cfn-lint flags: E3001 Invalid or unsupported type 'null' for resource TestBucket
 BROKEN_TEMPLATE = """\
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Broken template — missing Type on resource
+Description: Broken template — multiple cfn-lint violations
 Resources:
-  TestBucket:
+
+  # Violation 1 (E3001): Resource missing required 'Type' property
+  NoTypeBucket:
     Properties:
       BucketName: this-bucket-has-no-type
+
+  # Violation 2 (E3001): Completely invalid resource type
+  InvalidResource:
+    Type: AWS::DOESNOTEXIST::Resource
+    Properties:
+      SomeProperty: value
+
+  # Violation 3 (E3012 / W2001): Ref to a resource that does not exist
+  OtherBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref NonExistentParameter
+
+  # Violation 4 (E3002): Invalid property for the resource type
+  BucketWithBadProp:
+    Type: AWS::S3::Bucket
+    Properties:
+      ThisPropertyDoesNotExist: true
+      AlsoFake: 99999
 """
 
 VALID_TEMPLATE = """\
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Fixed template — resource Type restored
+# Metadata:
+#  cfn-lint:
+#    config:
+#      ignore_checks:
+#        - W
 Resources:
   TestBucket:
     Type: AWS::S3::Bucket

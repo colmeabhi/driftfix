@@ -39,6 +39,75 @@ resource "aws_cloudwatch_log_group" "pr_creator" {
   retention_in_days = 30
 }
 
+# ── Cold Start / Scaling Delay Metric Filters ────────────────────────────────
+# Extracts Init Duration from Lambda REPORT log lines (cold starts only).
+# Init Duration appears only when Lambda initialises a new execution environment;
+# warm invocations produce no data point, so gaps in the metric = warm periods.
+# Custom namespace: ${var.project}/Lambda  metric: InitDuration  unit: Milliseconds
+#
+# Use Average stat for mean cold start latency; SampleCount for cold start frequency.
+
+locals {
+  # Space-delimited extraction of Init Duration from Lambda REPORT log lines.
+  # Colon characters are not allowed in term values, so keyword fields like
+  # "RequestId:" and "Duration:" are captured as unconstrained positional fields.
+  # Anchored by r=REPORT (first token) and ik=Init (19th token); warm-start lines
+  # have only 19 tokens and will not match this 23-token pattern.
+  cold_start_pattern = "[r=REPORT, rk, id, dk, dur, du=ms, bk, bdk, bd, bu=ms, mk, sk, mem, mu=MB, xk, xmk, uk, xm, xu=MB, ik=Init, idk, init_dur, iu=ms]"
+}
+
+resource "aws_cloudwatch_log_metric_filter" "cold_starts_processor" {
+  name           = "${var.project}-processor-init-duration"
+  log_group_name = aws_cloudwatch_log_group.processor.name
+  pattern        = local.cold_start_pattern
+
+  metric_transformation {
+    name      = "ProcessorInitDuration"
+    namespace = "${var.project}/Lambda"
+    value     = "$init_dur"
+    unit      = "Milliseconds"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "cold_starts_stack_processor" {
+  name           = "${var.project}-stack-processor-init-duration"
+  log_group_name = aws_cloudwatch_log_group.stack_processor.name
+  pattern        = local.cold_start_pattern
+
+  metric_transformation {
+    name      = "StackProcessorInitDuration"
+    namespace = "${var.project}/Lambda"
+    value     = "$init_dur"
+    unit      = "Milliseconds"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "cold_starts_validator" {
+  name           = "${var.project}-validator-init-duration"
+  log_group_name = aws_cloudwatch_log_group.validator.name
+  pattern        = local.cold_start_pattern
+
+  metric_transformation {
+    name      = "ValidatorInitDuration"
+    namespace = "${var.project}/Lambda"
+    value     = "$init_dur"
+    unit      = "Milliseconds"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "cold_starts_pr_creator" {
+  name           = "${var.project}-pr-creator-init-duration"
+  log_group_name = aws_cloudwatch_log_group.pr_creator.name
+  pattern        = local.cold_start_pattern
+
+  metric_transformation {
+    name      = "PrCreatorInitDuration"
+    namespace = "${var.project}/Lambda"
+    value     = "$init_dur"
+    unit      = "Milliseconds"
+  }
+}
+
 # ── CloudWatch Dashboard ──────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_dashboard" "main" {
@@ -214,6 +283,30 @@ resource "aws_cloudwatch_dashboard" "main" {
           stat    = "Maximum"
           metrics = [
             ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${var.project}-processor-dlq"],
+          ]
+        }
+      },
+      # Row 5: Cold Start / Scaling Delay (Init Duration)
+      # Data points appear only on cold starts; gaps = warm invocations.
+      # Average = mean scaling delay; SampleCount = cold start frequency.
+      {
+        type   = "metric"
+        x      = 0
+        y      = 24
+        width  = 24
+        height = 6
+        properties = {
+          title   = "Cold Start / Scaling Delay — Init Duration (ms)"
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          period  = 300
+          stat    = "Average"
+          metrics = [
+            ["${var.project}/Lambda", "ProcessorInitDuration",      { label = "processor (avg ms)" }],
+            ["${var.project}/Lambda", "StackProcessorInitDuration", { label = "stack-processor (avg ms)" }],
+            ["${var.project}/Lambda", "ValidatorInitDuration",       { label = "validator (avg ms)" }],
+            ["${var.project}/Lambda", "PrCreatorInitDuration",       { label = "pr-creator (avg ms)" }],
           ]
         }
       },
