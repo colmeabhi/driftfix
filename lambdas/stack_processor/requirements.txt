@@ -1,4 +1,1 @@
 boto3
-# INTERIM: google-genai is a temporary dependency for Gemini integration.
-# TODO: Remove this line when switching to AWS Bedrock.
-google-genai>=1.0.0

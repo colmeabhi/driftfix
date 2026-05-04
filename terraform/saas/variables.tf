@@ -33,9 +33,9 @@ variable "github_token_secret_arn" {
 }
 
 variable "bedrock_model_id" {
-  description = "Bedrock model ID used for template generation (leave empty until decided)"
+  description = "Bedrock model ID used for template generation"
   type        = string
-  default     = ""
+  default     = "amazon.nova-lite-v1:0"
 }
 
 # INTERIM: Remove this variable when switching to Bedrock
