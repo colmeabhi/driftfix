@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 """
-Failure Scenario 2 — Concurrency Throttle
-==========================================
+Failure Scenario 2 — Concurrency Throttle (Account-Level Exhaustion)
+=====================================================================
 Failure type : Resource limit / infrastructure throttling
-Component    : Validator Lambda (reserved concurrency artificially lowered)
+Component    : Validator Lambda
 Rubric item  : "Intentionally trigger failure scenario; show system behavior,
                recovery mechanism, and monitoring evidence."
 
 What happens
 ------------
-Reserved concurrency on the Validator is set to CONCURRENCY_CAP (default 2).
-Then FLOOD_SIZE (default 20) concurrent synchronous invocations are fired.
-The invocations beyond the cap are rejected immediately with
-TooManyRequestsException — Lambda never executes them.
+This account has a total Lambda concurrency limit of 10 (the AWS minimum for
+sandbox/student accounts).  Reserved concurrency cannot be set when the limit
+equals the mandatory unreserved floor of 10.
 
-  Reserved concurrency = 2
+Instead, the script exhausts the account-level concurrency pool directly:
+FLOOD_SIZE (default 20) concurrent synchronous invocations are fired.  The
+first ~10 claim all available execution slots; the rest are rejected
+immediately with TooManyRequestsException — Lambda never executes them.
+
+  Account concurrency limit = 10
   20 concurrent invocations
-  → 2 succeed, ~18 throttled (TooManyRequestsException)
+  → ~10 succeed, ~10 throttled (TooManyRequestsException)
 
 In the real async pipeline (not exercised by this script):
   Stack Processor invokes Validator (InvocationType="Event")
@@ -25,45 +29,32 @@ In the real async pipeline (not exercised by this script):
 
 Recovery mechanism
 ------------------
-1. Remove the reserved concurrency limit (restores Lambda to account-level
-   concurrency pool) — performed automatically by this script's finally block.
-2. For sustained high load, request a Lambda concurrency limit increase via
-   AWS Support or the Service Quotas console.
-3. In the async pipeline, re-invoke any stranded events from the DLQ once
-   the concurrency setting is corrected.
+1. Throttling self-resolves as executing invocations complete (transient).
+2. For sustained load, request a Lambda concurrency quota increase via
+   AWS Service Quotas console or AWS Support.
+3. In the async pipeline, re-invoke stranded DLQ events once load subsides.
 
 Monitoring evidence (CloudWatch dashboard: drift-detector-overview)
 -------------------------------------------------------------------
 - Lambda Throttles widget: spike on drift-detector-validator
-- Lambda Invocations widget: low count relative to flood size (throttled
-  requests are never executed, so they don't appear as invocations)
-- DLQ Depth: reported as-is from the live queue; note that this synchronous
-  test does not directly write to the DLQ — messages there reflect failures
-  from the real async pipeline
+- Lambda Invocations widget: count < flood size (throttled requests are never
+  executed, so they don't appear as invocations)
+- DLQ Depth: empty for this synchronous test; in the async pipeline the Stack
+  Processor's on_failure destination would populate the DLQ
 - Alarm: drift-detector-validator-throttled fires (threshold = 0)
-
-⚠  SAFETY NOTE
-   This script modifies the Validator Lambda's reserved concurrency.
-   It ALWAYS restores the original setting at the end, even on error.
-   If interrupted, run with --restore to clean up manually.
 
 Usage
 -----
   export AWS_PROFILE=<your-profile>
   python tests/failure_scenarios/scenario_2_throttle.py
 
-  # If interrupted before restore:
-  python tests/failure_scenarios/scenario_2_throttle.py --restore
-
-  # Adjust parameters:
-  python tests/failure_scenarios/scenario_2_throttle.py \\
-    --cap 3 --flood 30
+  # Adjust flood size:
+  python tests/failure_scenarios/scenario_2_throttle.py --flood 25
 """
 
 import argparse
 import datetime
 import json
-import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -71,11 +62,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.exceptions import ClientError
 
-REGION          = "us-east-1"
-VALIDATOR_FN    = "drift-detector-validator"
-DLQ_NAME        = "drift-detector-processor-dlq"
-CONCURRENCY_CAP = 2    # reserved concurrency cap during the test
-FLOOD_SIZE      = 20   # number of concurrent invocations to fire
+REGION       = "us-east-1"
+VALIDATOR_FN = "drift-detector-validator"
+DLQ_NAME     = "drift-detector-processor-dlq"
+FLOOD_SIZE   = 20   # concurrent invocations; must exceed account concurrency limit
 
 VALID_TEMPLATE = """\
 AWSTemplateFormatVersion: '2010-09-09'
@@ -104,26 +94,6 @@ def _section(title):
     print(f"\n{'─' * 60}")
     print(f"  {title}")
     print("─" * 60)
-
-
-def _get_current_concurrency(lam):
-    try:
-        resp = lam.get_function_concurrency(FunctionName=VALIDATOR_FN)
-        return resp.get("ReservedConcurrentExecutions")  # None = unreserved
-    except ClientError:
-        return None
-
-
-def _set_concurrency(lam, value):
-    if value is None:
-        lam.delete_function_concurrency(FunctionName=VALIDATOR_FN)
-        print(f"  Reserved concurrency removed (unreserved).")
-    else:
-        lam.put_function_concurrency(
-            FunctionName=VALIDATOR_FN,
-            ReservedConcurrentExecutions=value,
-        )
-        print(f"  Reserved concurrency set to {value}.")
 
 
 def _invoke_worker(args):
@@ -178,18 +148,25 @@ def _check_dlq_depth(sqs):
 
 # ── Steps ─────────────────────────────────────────────────────────────────────
 
-def step_set_cap(lam, cap):
-    _section(f"SETUP — lowering Validator reserved concurrency to {cap}")
-    original = _get_current_concurrency(lam)
-    print(f"  Current reserved concurrency: {original!r} (will restore after test)")
-    _set_concurrency(lam, cap)
-    print("  Waiting 5 s for concurrency change to propagate…")
-    time.sleep(5)
-    return original
+def step_setup(lam, flood_size):
+    _section("SETUP — checking account concurrency limit")
+    settings   = lam.get_account_settings()
+    limit      = settings["AccountLimit"]["ConcurrentExecutions"]
+    unreserved = settings["AccountLimit"]["UnreservedConcurrentExecutions"]
+    print(f"  Account concurrency limit  : {limit}")
+    print(f"  Currently unreserved       : {unreserved}")
+    print(f"  Flood size                 : {flood_size}")
+    if flood_size <= limit:
+        print(f"\n  [WARN] Flood size ({flood_size}) <= account limit ({limit}).")
+        print(f"         Throttles may not occur. Consider --flood {limit * 2}.")
+    else:
+        print(f"\n  Flood size ({flood_size}) > account limit ({limit}).")
+        print(f"  Expected outcome: ~{limit} succeed, ~{flood_size - limit} throttled.")
+    return limit
 
 
-def step_flood(lam, flood_size, cap):
-    _section(f"TRIGGER — firing {flood_size} concurrent invocations (cap={cap})")
+def step_flood(lam, flood_size, account_limit):
+    _section(f"TRIGGER — firing {flood_size} concurrent invocations (account limit={account_limit})")
 
     payloads = []
     for i in range(flood_size):
@@ -231,19 +208,22 @@ def step_flood(lam, flood_size, cap):
 
     _section("RESULTS")
     print(f"  Succeeded : {results['success']}")
-    print(f"  Throttled : {results['throttled']}  ← expected ~{flood_size - cap}")
+    print(f"  Throttled : {results['throttled']}  ← expected ~{max(0, flood_size - account_limit)}")
     print(f"  Errors    : {results['lambda_error']}")
     print(f"  Other     : {results['other']}")
 
     if results["throttled"] > 0:
         print(f"\n  ✓ Throttling confirmed.")
+        print(f"    In the async pipeline, the Stack Processor's on_failure destination")
+        print(f"    would route each throttled event to the SQS DLQ.")
     else:
-        print(f"\n  ℹ  No throttles recorded — cap may not have propagated in time.")
-        print(f"     Re-run the script or check the Throttles widget on the dashboard.")
+        print(f"\n  ℹ  No throttles recorded.")
+        print(f"     Lambda may have scaled fast enough to handle all requests, or the")
+        print(f"     account limit was not reached. Try --flood {flood_size * 2}.")
 
 
-def step_evidence(cw, sqs):
-    _section("EVIDENCE — CloudWatch metrics")
+def step_evidence(cw, sqs, flood_size):
+    _section("EVIDENCE — CloudWatch metrics (post-flood)")
     print("  Waiting 90 s for CloudWatch metrics to propagate…", end="", flush=True)
     for _ in range(9):
         time.sleep(10)
@@ -261,9 +241,13 @@ def step_evidence(cw, sqs):
     else:
         print(f"  ℹ  Throttle metric not yet available — check dashboard in ~2 min.")
 
-    if invocations < FLOOD_SIZE:
-        print(f"  ✓ Invocations ({invocations}) < flood size ({FLOOD_SIZE}) — throttled "
+    if invocations < flood_size:
+        print(f"  ✓ Invocations ({invocations}) < flood size ({flood_size}) — throttled "
               f"requests were never executed (expected).")
+
+    print(f"\n  Recovery: throttling is transient and self-resolves as executing")
+    print(f"  invocations complete. No manual cleanup required.")
+    print(f"  For sustained load: request a quota increase via AWS Service Quotas.")
 
     depth, url = _check_dlq_depth(sqs)
     if depth is not None:
@@ -281,24 +265,13 @@ def step_evidence(cw, sqs):
     print(f"    https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1"
           f"#dashboards:name=drift-detector-overview")
 
-
-def step_restore(lam, original):
-    _section("RECOVERY — restoring Validator concurrency")
-    _set_concurrency(lam, original)
-    print(f"  ✓ Validator Lambda is back to normal operation.")
-    print(f"    In the async pipeline: re-invoke stranded DLQ events to drain the queue.")
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cap",   type=int, default=CONCURRENCY_CAP,
-                        help=f"Reserved concurrency cap during test (default: {CONCURRENCY_CAP})")
     parser.add_argument("--flood", type=int, default=FLOOD_SIZE,
                         help=f"Number of concurrent invocations (default: {FLOOD_SIZE})")
-    parser.add_argument("--restore", action="store_true",
-                        help="Remove reserved concurrency and exit (cleanup after interrupt).")
     parser.add_argument("--no-evidence", action="store_true",
                         help="Skip the 90-second CloudWatch polling wait.")
     args = parser.parse_args()
@@ -311,19 +284,10 @@ def main():
     print("║  Failure Scenario 2 — Lambda Concurrency Throttle        ║")
     print("╚══════════════════════════════════════════════════════════╝")
 
-    if args.restore:
-        _section("RESTORE ONLY")
-        _set_concurrency(lam, None)
-        print("  ✓ Done.")
-        return
-
-    original = step_set_cap(lam, args.cap)
-    try:
-        step_flood(lam, args.flood, args.cap)
-        if not args.no_evidence:
-            step_evidence(cw, sqs)
-    finally:
-        step_restore(lam, original)
+    account_limit = step_setup(lam, args.flood)
+    step_flood(lam, args.flood, account_limit)
+    if not args.no_evidence:
+        step_evidence(cw, sqs, args.flood)
 
     print()
 

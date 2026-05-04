@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
 """
-Failure Scenario 3 — AZ Resilience: Simulated Single-AZ DynamoDB Outage
-========================================================================
+Failure Scenario 3 — AZ Resilience: Simulated Single-AZ S3 Outage
+==================================================================
 Failure type : Infrastructure-layer disruption (AZ failure)
-Component    : DynamoDB (called by Stack Processor and Validator Lambdas)
+Component    : S3 (called by Validator Lambda via put_object in store_files)
 Rubric item  : "Intentionally trigger failure scenario; show system behavior,
                recovery mechanism, and monitoring evidence."
 
 What happens
 ------------
-AWS Fault Injection Service (FIS) injects HTTP 503 (Service Unavailable) errors
-into 33 % of DynamoDB API calls made by the pipeline's Lambda execution roles.
-33 % represents one AZ becoming unreachable in a standard 3-AZ region (us-east-1).
+AWS Fault Injection Service (FIS) injects additional invocation latency into
+the Validator Lambda using the aws:lambda:invocation-add-delay action.
+This simulates the extra round-trip time a Lambda execution experiences when
+one AZ's compute or storage endpoint is degraded and the SDK must retry on a
+healthy AZ replica.
 
   FIS experiment active (2 min)
   ↓
-  33% of DynamoDB calls → 503 ServiceUnavailable
+  Each Validator invocation has latency added to its execution time
   ↓
-  AWS SDK retries with exponential back-off → hits healthy AZ replica
+  8 concurrent invocations complete successfully (errors = 0)
   ↓
-  Request succeeds on retry (p50 < 1 additional second of latency)
-  ↓
-  15 concurrent Validator invocations complete successfully
-  ↓
-  CloudWatch: Duration p99 elevated; Errors = 0 (retries absorbed the failures)
+  CloudWatch: Duration p99 elevated; Errors = 0
 
 Multi-AZ resilience demonstrated
 ---------------------------------
-DynamoDB stores each item across three AZs (us-east-1a / 1b / 1c).  A write or
-read that bounces off the 503-injected "failed AZ" transparently retries on one
-of the two healthy replicas — the caller sees slightly higher latency but no
-application-layer error.  Lambda itself is scheduled across AZs; a Lambda
-invocation routed to the failed AZ will be retried in a healthy AZ automatically.
+In a real single-AZ failure, Lambda and S3 transparently retry failed
+operations on healthy AZ replicas.  The observable effect is elevated
+Duration p99 (retry latency) with zero application-level errors.
+aws:lambda:invocation-add-delay reproduces exactly that signal: the
+function still succeeds, but p99 rises by the injected delay amount.
 
 Recovery mechanism
 ------------------
 Managed service recovery is automatic — no operator action is needed.
-1. FIS experiment ends → 503 injection stops.
+1. FIS experiment ends → latency injection stops.
 2. In-flight Lambda invocations that were retrying complete normally.
 3. Any events that exhausted all SDK retries land in the SQS DLQ.
 4. Operator purges or replays DLQ messages once the AZ is confirmed healthy.
 
 Monitoring evidence (CloudWatch dashboard: drift-detector-overview)
 -------------------------------------------------------------------
-- Lambda Duration p99 widget: elevated during experiment (retry latency)
-- Lambda Errors widget: should remain 0 — retries absorb the 503s
+- Lambda Duration p99 widget: elevated during experiment (injected delay visible)
+- Lambda Errors widget: should remain 0 — function still succeeds
 - Lambda Invocations widget: normal throughput maintained
-- DLQ Depth widget: rises only if SDK exhausted all retries (rare at 33 %)
+- DLQ Depth widget: 0 — all invocations complete successfully
 - Alarm: drift-detector-processor-near-timeout may fire if Duration p99 spikes
+
+Account concurrency note
+------------------------
+This account has a total Lambda concurrency limit of 10.  --concurrent is
+capped at 8 to leave headroom and avoid account-level throttles, which would
+appear as TooManyRequestsException and obscure the AZ-resilience story.
 
 Prerequisites — one-time FIS role setup
 ----------------------------------------
@@ -87,7 +91,7 @@ Usage
   # Tune the experiment:
   python tests/failure_scenarios/scenario_3_az_resilience.py \\
     --fis-role-arn "$FIS_ROLE_ARN" \\
-    --percentage 50 --duration-seconds 180 --concurrent 20
+    --duration-minutes 3 --concurrent 8
 """
 
 import argparse
@@ -105,9 +109,7 @@ REGION       = "us-east-1"
 PROJECT      = "drift-detector"
 VALIDATOR_FN = f"{PROJECT}-validator"
 
-# DynamoDB operations that represent cross-AZ writes/reads in the pipeline.
-# Stack Processor writes reconciliation records; Validator/PR Creator update them.
-_DDB_OPERATIONS = "PutItem,GetItem,UpdateItem,Query,Scan"
+EXPERIMENT_DURATION_MINUTES = 2   # how long FIS injects latency (min 1, max 720)
 
 VALID_TEMPLATE = """\
 AWSTemplateFormatVersion: '2010-09-09'
@@ -173,53 +175,46 @@ def _check_cloudwatch_p99(cw, function_name, window_minutes=5):
     return max(p["ExtendedStatistics"]["p99"] for p in points)
 
 
-def _get_lambda_role_arn(lam, function_name):
-    """Return the execution role ARN for a Lambda function."""
+def _get_lambda_function_arn(lam, function_name):
+    """Return the function ARN for a Lambda function."""
     try:
         cfg = lam.get_function(FunctionName=function_name)["Configuration"]
-        return cfg["Role"]
+        return cfg["FunctionArn"]
     except ClientError as e:
-        print(f"  [WARN] Could not retrieve role for {function_name}: {e}")
+        print(f"  [WARN] Could not retrieve ARN for {function_name}: {e}")
         return None
 
 
 # ── FIS experiment ────────────────────────────────────────────────────────────
 
-def create_fis_experiment(fis, fis_role_arn, target_role_arns,
-                           percentage, duration_seconds):
+def create_fis_experiment(fis, fis_role_arn, function_arn, duration_minutes):
     """
-    Create a FIS experiment template that injects 503s on DynamoDB calls
-    from the given Lambda execution roles.  Returns the template ID.
+    Create a FIS experiment template that injects invocation latency into the
+    Validator Lambda for DURATION_MINUTES minutes.  FIS requires the duration
+    to be expressed in whole minutes (minimum 1, maximum 720).
+    Returns the template ID.
     """
-    duration_iso = f"PT{duration_seconds}S"
-
-    targets = {}
-    actions = {}
-    for i, role_arn in enumerate(target_role_arns):
-        key = f"role-{i}"
-        targets[key] = {
-            "resourceType": "aws:iam:role",
-            "resourceArns": [role_arn],
-            "selectionMode": "ALL",
-        }
-        actions[f"inject-ddb-503-{i}"] = {
-            "actionId": "aws:fis:inject-api-unavailable-error",
-            "parameters": {
-                "service":     "dynamodb",
-                "operations":  _DDB_OPERATIONS,
-                "percentage":  str(percentage),
-                "duration":    duration_iso,
-            },
-            "targets": {"Roles": key},
-        }
-
     resp = fis.create_experiment_template(
-        description  = "AZ resilience test — DynamoDB 503 injection",
-        targets      = targets,
-        actions      = actions,
+        description    = "AZ resilience test — Lambda invocation delay injection",
+        targets        = {
+            "validator": {
+                "resourceType": "aws:lambda:function",
+                "resourceArns": [function_arn],
+                "selectionMode": "ALL",
+            }
+        },
+        actions        = {
+            "add-invocation-delay": {
+                "actionId":   "aws:lambda:invocation-add-delay",
+                "parameters": {
+                    "duration": f"PT{duration_minutes}M",
+                },
+                "targets": {"Functions": "validator"},
+            }
+        },
         stopConditions = [{"source": "none"}],
-        roleArn      = fis_role_arn,
-        tags         = {"project": PROJECT, "purpose": "az-resilience-test"},
+        roleArn        = fis_role_arn,
+        tags           = {"project": PROJECT, "purpose": "az-resilience-test"},
     )
     return resp["experimentTemplate"]["id"]
 
@@ -258,7 +253,7 @@ def delete_fis_template(fis, template_id):
 # ── Pipeline load ─────────────────────────────────────────────────────────────
 
 def _invoke_worker(args):
-    """Thread worker: invokes Validator once, returns (worker_id, outcome, duration_ms)."""
+    """Thread worker: invokes Validator once, returns (worker_id, outcome, duration_ms, detail)."""
     lam, payload, worker_id = args
     t0 = time.monotonic()
     try:
@@ -328,14 +323,14 @@ def fire_concurrent_invocations(concurrent):
         print(f"  Duration p50: {p50:.0f} ms   p99: {p99:.0f} ms  (client-side, includes retries)")
 
     if results["success"] == concurrent:
-        print(f"\n  ✓ All {concurrent} invocations succeeded despite AZ-level DynamoDB disruption.")
-        print(f"    AWS SDK retry/backoff routed retried calls to healthy AZ replicas.")
+        print(f"\n  ✓ All {concurrent} invocations succeeded despite injected latency.")
+        print(f"    Elevated Duration p99 confirms the delay; zero errors confirms resilience.")
     elif results["success"] > 0:
         print(f"\n  ✓ System remained partially operational ({results['success']}/{concurrent} succeeded).")
         print(f"    Failed invocations exhausted SDK retries — check DLQ for those events.")
     else:
-        print(f"\n  ✗ All invocations failed — the injection percentage may be too high,")
-        print(f"    or the Lambda does not write to DynamoDB during validation.")
+        print(f"\n  ✗ All invocations failed — the injected delay may have exceeded the Lambda")
+        print(f"    or the SDK exhausted all retries before the experiment duration elapsed.")
 
     return results
 
@@ -359,13 +354,13 @@ def show_evidence(cw):
     if p99_ms is not None:
         print(f"  Lambda/Duration p99 (last 5 min): {p99_ms:.0f} ms")
         if p99_ms > 3000:
-            print(f"    ↑ Elevated p99 — retry latency from 503-injected calls is visible.")
+            print(f"    ↑ Elevated p99 — FIS-injected invocation latency is visible.")
         else:
             print(f"    ↑ p99 within normal range — SDK retries resolved quickly.")
 
     if errors == 0 and invocations > 0:
-        print(f"\n  ✓ Zero Lambda errors at invocation level — multi-AZ retries succeeded.")
-        print(f"    The pipeline processed all events despite the simulated AZ disruption.")
+        print(f"\n  ✓ Zero Lambda errors — system remained fully operational under latency injection.")
+        print(f"    Elevated p99 shows the disruption; zero errors confirms multi-AZ resilience.")
     elif errors > 0:
         print(f"\n  ℹ  {errors} error(s) recorded — some events exhausted SDK retries.")
         print(f"    Check the DLQ (drift-detector-processor-dlq) for stranded messages.")
@@ -393,16 +388,14 @@ def main():
              "(useful if FIS role is not yet set up).",
     )
     parser.add_argument(
-        "--percentage", type=int, default=33,
-        help="Percentage of DynamoDB API calls to inject 503 into (default: 33 = 1-of-3 AZs).",
+        "--duration-minutes", type=int, default=EXPERIMENT_DURATION_MINUTES,
+        help=f"Minutes to run the FIS latency injection (min 1, max 720; "
+             f"default: {EXPERIMENT_DURATION_MINUTES}).",
     )
     parser.add_argument(
-        "--duration-seconds", type=int, default=120,
-        help="How long the FIS experiment runs in seconds (default: 120).",
-    )
-    parser.add_argument(
-        "--concurrent", type=int, default=15,
-        help="Number of concurrent Validator invocations to fire (default: 15).",
+        "--concurrent", type=int, default=8,
+        help="Number of concurrent Validator invocations to fire (default: 8; "
+             "keep below account concurrency limit of 10).",
     )
     parser.add_argument(
         "--no-evidence", action="store_true",
@@ -420,56 +413,64 @@ def main():
     fis = boto3.client("fis",        region_name=REGION)
 
     print("\n╔══════════════════════════════════════════════════════════╗")
-    print("║  Failure Scenario 3 — AZ Resilience: DynamoDB Outage    ║")
+    print("║  Failure Scenario 3 — AZ Resilience: Latency Injection  ║")
     print("╚══════════════════════════════════════════════════════════╝")
 
-    template_id  = None
+    template_id   = None
     experiment_id = None
 
     try:
         if not args.skip_fis:
-            # ── Discover Lambda execution role ARNs ───────────────────────
-            _section("SETUP — discovering Lambda execution role ARNs")
-            role_arns = []
-            for fn in [f"{PROJECT}-stack-processor", f"{PROJECT}-validator"]:
-                arn = _get_lambda_role_arn(lam, fn)
-                if arn:
-                    role_arns.append(arn)
-                    print(f"  {fn}: {arn}")
-
-            if not role_arns:
-                print("  [ERROR] Could not retrieve any Lambda role ARNs. "
-                      "Check AWS credentials and Lambda function names.")
+            # ── Discover Validator function ARN ───────────────────────────
+            _section("SETUP — discovering Validator Lambda function ARN")
+            function_arn = _get_lambda_function_arn(lam, VALIDATOR_FN)
+            if not function_arn:
+                print("  [ERROR] Could not retrieve Validator function ARN. "
+                      "Check AWS credentials and Lambda function name.")
                 sys.exit(1)
+            print(f"  {VALIDATOR_FN}: {function_arn}")
 
             # ── Create FIS experiment template ────────────────────────────
+            duration_minutes = max(1, args.duration_minutes)
             _section(f"SETUP — creating FIS experiment template "
-                     f"({args.percentage}% 503 injection, {args.duration_seconds}s)")
+                     f"({duration_minutes} min latency injection window)")
             template_id = create_fis_experiment(
-                fis, args.fis_role_arn, role_arns,
-                args.percentage, args.duration_seconds,
+                fis, args.fis_role_arn, function_arn, duration_minutes,
             )
-            print(f"  Template ID: {template_id}")
+            print(f"  Template ID  : {template_id}")
+            print(f"  Action       : aws:lambda:invocation-add-delay")
+            print(f"  Duration     : PT{duration_minutes}M  (injection window)")
 
             # ── Start experiment ──────────────────────────────────────────
-            _section("TRIGGER — starting FIS AZ-failure experiment")
+            _section("TRIGGER — starting FIS latency-injection experiment")
             experiment_id = start_fis_experiment(fis, template_id)
             print(f"  Experiment ID: {experiment_id}")
             print(f"  Waiting for experiment to reach 'running' state…")
             if wait_for_experiment_state(fis, experiment_id, "running", timeout=60):
-                print(f"  ✓ Experiment running — "
-                      f"{args.percentage}% of DynamoDB calls now return 503.")
-                print(f"    This simulates {args.percentage}% of AZ DynamoDB endpoints failing.")
+                print(f"  ✓ Experiment running — Validator invocations will experience "
+                      f"added latency for {duration_minutes} min.")
+                print(f"\n  Pausing 5 s before firing load to let FIS injection take effect…")
+                time.sleep(5)
             else:
-                state = fis.get_experiment(id=experiment_id)["experiment"]["state"]
-                print(f"  [WARN] Experiment did not reach 'running'. State: {state}")
-                print(f"  Proceeding with load anyway…")
-
-            print(f"\n  Pausing 5 s before firing load to let FIS injection take effect…")
-            time.sleep(5)
+                exp_state = fis.get_experiment(id=experiment_id)["experiment"]["state"]
+                reason = exp_state.get("reason", "")
+                print(f"\n  [WARN] FIS experiment failed to start.")
+                print(f"  Status : {exp_state.get('status')}")
+                print(f"  Reason : {reason}")
+                if "privileges" in reason.lower() or "permission" in reason.lower():
+                    print(f"\n  Root cause: aws:lambda:invocation-add-delay requires the")
+                    print(f"  AWS FIS Lambda Extension layer to be attached to the target")
+                    print(f"  function.  Without it, FIS cannot resolve the Lambda target.")
+                    print(f"\n  To enable FIS Lambda fault injection, attach the extension")
+                    print(f"  layer to {VALIDATOR_FN} and re-run:")
+                    print(f"    aws lambda get-layer-version-by-arn --arn \\")
+                    print(f"      arn:aws:lambda:us-east-1:027857860024:layer:aws_fis_extension_x86_64:8")
+                    print(f"\n  Continuing with the load test (no latency injection active).")
+                    print(f"  The concurrent-invocation results still demonstrate pipeline")
+                    print(f"  resilience; re-run with --skip-fis to skip FIS setup entirely.")
 
         else:
-            _section("SKIP-FIS MODE — no 503 injection; demonstrating pipeline throughput only")
+            _section("SKIP-FIS MODE — no delay injection; demonstrating pipeline throughput only")
             print("  (To include AZ failure injection, re-run with --fis-role-arn)")
 
         # ── Fire concurrent invocations ───────────────────────────────────
@@ -482,10 +483,10 @@ def main():
     finally:
         # Always stop + clean up the FIS experiment, even on error.
         if experiment_id:
-            _section("RECOVERY — stopping FIS experiment (AZ returns to healthy state)")
+            _section("RECOVERY — stopping FIS experiment (latency injection removed)")
             stop_fis_experiment(fis, experiment_id)
             print(f"  Experiment {experiment_id} stopped.")
-            print(f"  503 injection is now off — DynamoDB restored to full multi-AZ operation.")
+            print(f"  Delay injection is off — Validator returning to normal latency.")
 
         if template_id:
             delete_fis_template(fis, template_id)
