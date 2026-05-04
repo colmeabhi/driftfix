@@ -20,22 +20,22 @@ resource "aws_sns_topic_subscription" "alert_email" {
 #   terraform import aws_cloudwatch_log_group.pr_creator  /aws/lambda/drift-detector-pr-creator
 
 resource "aws_cloudwatch_log_group" "processor" {
-  name              = "/aws/lambda/${aws_lambda_function.processor.function_name}"
+  name              = "/aws/lambda/${var.project}-processor"
   retention_in_days = 30
 }
 
 resource "aws_cloudwatch_log_group" "stack_processor" {
-  name              = "/aws/lambda/${aws_lambda_function.stack_processor.function_name}"
+  name              = "/aws/lambda/${var.project}-stack-processor"
   retention_in_days = 30
 }
 
 resource "aws_cloudwatch_log_group" "validator" {
-  name              = "/aws/lambda/${aws_lambda_function.validator.function_name}"
+  name              = "/aws/lambda/${var.project}-validator"
   retention_in_days = 30
 }
 
 resource "aws_cloudwatch_log_group" "pr_creator" {
-  name              = "/aws/lambda/${aws_lambda_function.pr_creator.function_name}"
+  name              = "/aws/lambda/${var.project}-pr-creator"
   retention_in_days = 30
 }
 
@@ -61,10 +61,10 @@ resource "aws_cloudwatch_dashboard" "main" {
           period  = 300
           stat    = "Sum"
           metrics = [
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.processor.function_name],
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.stack_processor.function_name],
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.validator.function_name],
-            ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.pr_creator.function_name],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-processor"],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-stack-processor"],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-validator"],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-pr-creator"],
           ]
         }
       },
@@ -82,10 +82,10 @@ resource "aws_cloudwatch_dashboard" "main" {
           period  = 300
           stat    = "Sum"
           metrics = [
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.processor.function_name],
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.stack_processor.function_name],
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.validator.function_name],
-            ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.pr_creator.function_name],
+            ["AWS/Lambda", "Errors", "FunctionName", "${var.project}-processor"],
+            ["AWS/Lambda", "Errors", "FunctionName", "${var.project}-stack-processor"],
+            ["AWS/Lambda", "Errors", "FunctionName", "${var.project}-validator"],
+            ["AWS/Lambda", "Errors", "FunctionName", "${var.project}-pr-creator"],
           ]
         }
       },
@@ -104,10 +104,10 @@ resource "aws_cloudwatch_dashboard" "main" {
           period  = 300
           stat    = "p99"
           metrics = [
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.processor.function_name],
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.stack_processor.function_name],
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.validator.function_name],
-            ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.pr_creator.function_name],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-processor"],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-stack-processor"],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-validator"],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-pr-creator"],
           ]
         }
       },
@@ -125,10 +125,10 @@ resource "aws_cloudwatch_dashboard" "main" {
           period  = 300
           stat    = "Sum"
           metrics = [
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.processor.function_name],
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.stack_processor.function_name],
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.validator.function_name],
-            ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.pr_creator.function_name],
+            ["AWS/Lambda", "Throttles", "FunctionName", "${var.project}-processor"],
+            ["AWS/Lambda", "Throttles", "FunctionName", "${var.project}-stack-processor"],
+            ["AWS/Lambda", "Throttles", "FunctionName", "${var.project}-validator"],
+            ["AWS/Lambda", "Throttles", "FunctionName", "${var.project}-pr-creator"],
           ]
         }
       },
@@ -147,10 +147,10 @@ resource "aws_cloudwatch_dashboard" "main" {
           period  = 60
           stat    = "Maximum"
           metrics = [
-            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", aws_lambda_function.processor.function_name],
-            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", aws_lambda_function.stack_processor.function_name],
-            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", aws_lambda_function.validator.function_name],
-            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", aws_lambda_function.pr_creator.function_name],
+            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${var.project}-processor"],
+            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${var.project}-stack-processor"],
+            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${var.project}-validator"],
+            ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "${var.project}-pr-creator"],
           ]
         }
       },
@@ -169,7 +169,7 @@ resource "aws_cloudwatch_dashboard" "main" {
           period  = 300
           stat    = "Maximum"
           metrics = [
-            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.processor_dlq.name],
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "${var.project}-processor-dlq"],
           ]
         }
       },
@@ -194,7 +194,7 @@ resource "aws_cloudwatch_metric_alarm" "processor_errors" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.processor.function_name
+    FunctionName = "${var.project}-processor"
   }
 }
 
@@ -214,7 +214,7 @@ resource "aws_cloudwatch_metric_alarm" "stack_processor_errors" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.stack_processor.function_name
+    FunctionName = "${var.project}-stack-processor"
   }
 }
 
@@ -234,7 +234,7 @@ resource "aws_cloudwatch_metric_alarm" "processor_near_timeout" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.processor.function_name
+    FunctionName = "${var.project}-processor"
   }
 }
 
@@ -254,7 +254,7 @@ resource "aws_cloudwatch_metric_alarm" "validator_errors" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.validator.function_name
+    FunctionName = "${var.project}-validator"
   }
 }
 
@@ -273,7 +273,7 @@ resource "aws_cloudwatch_metric_alarm" "validator_throttles" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.validator.function_name
+    FunctionName = "${var.project}-validator"
   }
 }
 
@@ -293,7 +293,7 @@ resource "aws_cloudwatch_metric_alarm" "pr_creator_errors" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.pr_creator.function_name
+    FunctionName = "${var.project}-pr-creator"
   }
 }
 
@@ -312,6 +312,6 @@ resource "aws_cloudwatch_metric_alarm" "processor_throttles" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 
   dimensions = {
-    FunctionName = aws_lambda_function.processor.function_name
+    FunctionName = "${var.project}-processor"
   }
 }
