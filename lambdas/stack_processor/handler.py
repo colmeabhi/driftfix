@@ -15,6 +15,7 @@ changed; unchanged files are not sent downstream.
 # INTERIM: Using Google Gemini. TODO: Replace with AWS Bedrock.
 """
 
+import base64
 import json
 import logging
 import os
@@ -30,19 +31,14 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-sts_client = boto3.client("sts")
-lambda_client = boto3.client("lambda")
-dynamodb = boto3.resource("dynamodb")
-bedrock_runtime = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-east-2"))
-sts_client     = boto3.client("sts")
-lambda_client  = boto3.client("lambda")
-secretsmanager = boto3.client("secretsmanager")
+sts_client      = boto3.client("sts")
+lambda_client   = boto3.client("lambda")
+secretsmanager  = boto3.client("secretsmanager")
+bedrock_runtime = boto3.client("bedrock-runtime", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 
 RECONCILIATIONS_TABLE   = os.environ["DYNAMODB_RECONCILIATIONS_TABLE"]
 VALIDATOR_FUNCTION_NAME = os.environ["VALIDATOR_FUNCTION_NAME"]
-
-# INTERIM: Gemini — remove when switching to Bedrock
-GEMINI_API_KEY_SECRET_ARN = os.environ.get("GEMINI_API_KEY_SECRET_ARN", "")
+BEDROCK_MODEL_ID        = os.environ.get("BEDROCK_MODEL_ID", "")
 
 _secret_cache = {}
 
@@ -52,6 +48,10 @@ def lambda_handler(event, context):
     stack_name        = event["stack_name"]
     cloudtrail_events = event["cloudtrail_events"]
     tenant_id         = tenant["tenant_id"]
+
+    if not cloudtrail_events:
+        logger.warning("Invoked with empty cloudtrail_events for stack=%s — nothing to do", stack_name)
+        return
 
     logger.info("Processing stack=%s tenant=%s events=%d",
                 stack_name, tenant_id, len(cloudtrail_events))
@@ -66,8 +66,7 @@ def lambda_handler(event, context):
     # primary_path = the template file path (None if CFn fallback was used)
     files, primary_path = fetch_files(creds, stack_name, region, github_token, github_repo)
 
-    # updated_files = only the files Gemini changed (subset of files keys)
-    updated_files = invoke_gemini(files, cloudtrail_events)  # INTERIM: swap for invoke_bedrock()
+    updated_files = invoke_bedrock(files, cloudtrail_events)
 
     invoke_validator(tenant, stack_name, cloudtrail_events[0],
                      files, updated_files, primary_path)
@@ -78,11 +77,11 @@ def lambda_handler(event, context):
 def fetch_files(creds, stack_name, region, github_token, github_repo):
     """
     Return ({path: content}, primary_path).
-    Tries GitHub first; falls back to CloudFormation.
+    Tries GitHub first (name match, then content match); falls back to CloudFormation.
     primary_path is None when CFn fallback is used.
     """
     if github_token and github_repo:
-        result = _fetch_github_files(github_token, github_repo, stack_name)
+        result = _fetch_github_files(github_token, github_repo, stack_name, creds, region)
         if result:
             files, primary_path = result
             logger.info("GitHub source: %s (+%d param file(s))",
@@ -106,10 +105,10 @@ def _fetch_cfn_template(creds, stack_name, region):
     return body if isinstance(body, str) else json.dumps(body, indent=2)
 
 
-def _fetch_github_files(token, repo, stack_name):
+def _fetch_github_files(token, repo, stack_name, creds=None, region=None):
     """
     1. Fetch repo tree
-    2. Find the template file by name matching
+    2. Find the template file by name matching, then content matching as fallback
     3. Scan the same directory for parameter files
     Returns ({path: content}, primary_path) or None.
     """
@@ -131,8 +130,12 @@ def _fetch_github_files(token, repo, stack_name):
     }
     yaml_blobs = [p for p in blobs if p.lower().endswith((".yaml", ".yml", ".json"))]
 
-    # ── Find template file ────────────────────────────────────────────────────
+    # ── Find template file (name-based, then content-based fallback) ──────────
     template_path = _find_template(token, owner, repo_name, branch, yaml_blobs, stack_name)
+    if not template_path and creds and region:
+        template_path = _find_template_by_content(
+            token, owner, repo_name, branch, yaml_blobs, creds, stack_name, region
+        )
     if not template_path:
         return None
 
@@ -224,88 +227,154 @@ def _find_template(token, owner, repo_name, branch, blobs, stack_name):
     return None
 
 
-# ── INTERIM: Gemini ───────────────────────────────────────────────────────────
-# TODO: Replace invoke_gemini() with invoke_bedrock().
-
-def invoke_gemini(files, cloudtrail_events):
+def _find_template_by_content(token, owner, repo_name, branch, blobs, creds, stack_name, region):
     """
-    INTERIM: Pass all files to Gemini, get back only the changed ones.
-    Replace with invoke_bedrock() when Bedrock model is decided.
+    Fallback: fetch the live CFn template body and find the repo file with the
+    highest Jaccard similarity on resource logical IDs.  Handles repos where the
+    directory name has no lexical relation to the stack name (e.g. drift-test-06
+    → stacks/06-sns-sqs/template.yaml).
     """
-    from google import genai
+    try:
+        cfn_content = _fetch_cfn_template(creds, stack_name, region)
+    except Exception as e:
+        logger.warning("Content-match: CFn fetch failed: %s", e)
+        return None
 
-    client = genai.Client(api_key=_get_secret(GEMINI_API_KEY_SECRET_ARN))
+    known_ids = _extract_resource_ids(cfn_content)
+    if not known_ids:
+        return None
 
-    files_block = "\n\n".join(
-        f"=== FILE: {path} ===\n{content}"
-        for path, content in files.items()
+    # Only consider files whose basename looks like a CFn template entry-point
+    standard_names = {"template.yaml", "template.yml", "main.yaml", "main.yml",
+                      "stack.yaml", "stack.yml"}
+    candidates = [p for p in blobs if p.rsplit("/", 1)[-1].lower() in standard_names]
+    if not candidates:
+        candidates = blobs  # fall back to all YAML/JSON blobs
+
+    best_score, best_path = 0.0, None
+    for path in candidates[:30]:
+        content = _file_content(token, owner, repo_name, path, branch)
+        if not content or not _is_cfn(content):
+            continue
+        score = _jaccard(known_ids, _extract_resource_ids(content))
+        if score > best_score:
+            best_score, best_path = score, path
+
+    if best_score >= 0.3:
+        logger.info("Content-based template match: %s (jaccard=%.2f)", best_path, best_score)
+        return best_path
+
+    logger.warning("Content-based match found no candidate above threshold (best=%.2f)", best_score)
+    return None
+
+
+def _extract_resource_ids(template_str):
+    if not template_str:
+        return set()
+    if template_str.strip().startswith("{"):
+        try:
+            return set(json.loads(template_str).get("Resources", {}).keys())
+        except Exception:
+            return set()
+    ids, in_resources = set(), False
+    for line in template_str.splitlines():
+        if re.match(r"^Resources\s*:", line):
+            in_resources = True
+            continue
+        if in_resources:
+            m = re.match(r"^  ([A-Za-z][A-Za-z0-9]*)\s*:", line)
+            if m:
+                ids.add(m.group(1))
+            elif line and not line[0].isspace():
+                break
+    return ids
+
+
+def _jaccard(a, b):
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+# ── GitHub API ────────────────────────────────────────────────────────────────
+
+def _github_request(token, method, path, body=None):
+    url  = f"https://api.github.com{path}"
+    data = json.dumps(body).encode() if body else None
+    req  = urllib.request.Request(
+        url, data=data, method=method,
+        headers={
+            "Authorization":        f"Bearer {token}",
+            "Accept":               "application/vnd.github+json",
+            "Content-Type":         "application/json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
     )
-    events_str = json.dumps(cloudtrail_events, indent=2, default=str)
-
-    prompt = (
-        "You are a CloudFormation expert. An engineer made manual changes to AWS resources "
-        "outside of CloudFormation, causing infrastructure drift.\n\n"
-        "The following files from the team's source repository make up the stack configuration. "
-        "Preserve all structure, comments, and formatting exactly:\n\n"
-        f"{files_block}\n\n"
-        "Here are the CloudTrail events describing what was manually changed:\n"
-        f"{events_str}\n\n"
-        "Rules:\n"
-        "- Update ONLY the parts affected by these changes\n"
-        "- If a value corresponds to a parameter, update the parameters file instead of "
-        "hardcoding the value in the template\n"
-        "- If a new resource attribute is needed, add a Parameter + update the parameters file\n"
-        "- Preserve all !Ref, !Sub, !GetAtt, !If, and other intrinsic functions\n"
-        "- Return ONLY the files that changed, using this exact format with no other text:\n\n"
-        "=== FILE: <path> ===\n"
-        "<full updated file content>\n"
-        "=== FILE: <path2> ===\n"
-        "<full updated file content>\n\n"
-        "Do not include files that did not change. No markdown fences, no explanation."
-    )
-
-    logger.info("Calling Gemini with %d file(s) (INTERIM)", len(files))
-    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-    return _parse_multi_file_response(response.text.strip(), files)
-
-# ── End INTERIM Gemini section ────────────────────────────────────────────────
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
 
 
-def _parse_multi_file_response(raw, original_files):
-    """
-    Parse === FILE: path === delimited output from the LLM.
-    Only accepts paths that exist in original_files (prevents path injection).
-    """
-    # Strip markdown fences that the LLM might add despite instructions
-    raw = re.sub(r"^```\w*\s*", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"```\s*$", "", raw, flags=re.MULTILINE)
-
-    parts = re.split(r"=== FILE: (.+?) ===\s*\n", raw)
-    # parts[0] = preamble (discard), then alternating path / content
-    result = {}
-    for i in range(1, len(parts) - 1, 2):
-        path    = parts[i].strip()
-        content = parts[i + 1].strip() if i + 1 < len(parts) else ""
-        if path in original_files and content:
-            result[path] = content
-
-    if not result:
-        logger.warning("LLM returned no parseable files — treating primary file as changed")
-        primary = next(iter(original_files))
-        result[primary] = raw.strip()
-
-    return result
+def _file_content(token, owner, repo_name, path, branch):
+    try:
+        resp = _github_request(token, "GET",
+                   f"/repos/{owner}/{repo_name}/contents/{path}?ref={branch}")
+        return base64.b64decode(resp["content"]).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _extract_json(text):
+    """
+    Strip markdown fences and leading prose so json.loads always gets clean JSON.
+    Handles: ```json ... ```, ``` ... ```, and 'Here is the JSON:\n{...}'.
+    """
+    text = text.strip()
+    # Strip markdown fences
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-z]*\n?", "", text).rstrip("`").strip()
+    # If there's still no leading brace/bracket, find the first one
+    first_brace = min(
+        (text.find(c) for c in ("{", "[") if text.find(c) != -1),
+        default=-1,
+    )
+    if first_brace > 0:
+        text = text[first_brace:]
+    # Trim trailing prose after the final closing brace/bracket
+    last_brace = max(text.rfind("}"), text.rfind("]"))
+    if last_brace != -1:
+        text = text[: last_brace + 1]
+    return text
+
 
 def _norm(s):
     return re.sub(r"[-_\s]", "", s).lower()
 
 
-def invoke_bedrock(cfn_template, cloudtrail_events):
+def _is_cfn(content):
+    return bool(content) and (
+        "AWSTemplateFormatVersion" in content
+        or "Transform: AWS::Serverless" in content
+        or ("Resources:" in content and "Type: AWS::" in content)
+    )
+
+
+def invoke_bedrock(files, cloudtrail_events):
+    """
+    Send the primary CFn template to Bedrock and return updated_files dict.
+    files = {repo_path: content} — template + any parameter files.
+    Returns {primary_path: updated_content} with only the changed file.
+    """
     if not BEDROCK_MODEL_ID:
         raise RuntimeError("BEDROCK_MODEL_ID is not configured")
+
+    # Find the primary CFn template (first file that looks like a CFn template)
+    primary_path = next(
+        (p for p, c in files.items() if _is_cfn(c)),
+        next(iter(files)),
+    )
+    cfn_template = files[primary_path]
 
     evidence = {
         "region": cloudtrail_events[0].get("awsRegion", "unknown") if cloudtrail_events else "unknown",
@@ -335,11 +404,14 @@ def invoke_bedrock(cfn_template, cloudtrail_events):
         "evidence": evidence,
     }
 
+    prompt_text = instructions + "\nINPUT:\n" + json.dumps(user_input)
+
+    # Amazon Nova Converse-style request format
     request_body = {
         "messages": [
-            {"role": "user", "content": instructions + "\nINPUT:\n" + json.dumps(user_input)}
+            {"role": "user", "content": [{"text": prompt_text}]}
         ],
-        "max_tokens": 2048,
+        "inferenceConfig": {"maxTokens": 4096},
     }
 
     max_attempts = 4
@@ -358,43 +430,17 @@ def invoke_bedrock(cfn_template, cloudtrail_events):
             raw = resp["body"].read()
             data = json.loads(raw)
 
-
-
-            # Try to extract the model's text response
+            # Amazon Nova response: {"output": {"message": {"content": [{"text": "..."}]}}}
             model_text = None
-
-            if (
-                isinstance(data, dict)
-                and isinstance(data.get("choices"), list)
-                and data["choices"]
-                and isinstance(data["choices"][0], dict)
-            ):
-                message = data["choices"][0].get("message", {})
-                if isinstance(message, dict) and isinstance(message.get("content"), str):
-                    model_text = message["content"]
-
-            elif isinstance(data, dict) and isinstance(data.get("output"), str):
-                model_text = data["output"]
-
-            elif isinstance(data, dict) and isinstance(data.get("content"), str):
-                model_text = data["content"]
-
-            elif isinstance(data, dict) and isinstance(data.get("candidates"), list) and data["candidates"]:
-                cand = data["candidates"][0]
-                parts = cand.get("content", {}).get("parts", []) if isinstance(cand, dict) else []
-                if parts and isinstance(parts[0], dict) and isinstance(parts[0].get("text"), str):
-                    model_text = parts[0]["text"]
+            try:
+                model_text = data["output"]["message"]["content"][0]["text"]
+            except (KeyError, IndexError, TypeError):
+                pass
 
             if not model_text:
                 raise RuntimeError(f"Could not extract model text from Bedrock response: {json.dumps(data)[:1000]}")
 
-            model_text = model_text.strip()
-            if model_text.startswith("```json"):
-                model_text = model_text[len("```json"):].strip()
-            if model_text.startswith("```"):
-                model_text = model_text[len("```"):].strip()
-            if model_text.endswith("```"):
-                model_text = model_text[:-3].strip()
+            model_text = _extract_json(model_text)
 
             result = json.loads(model_text)
 
@@ -412,7 +458,7 @@ def invoke_bedrock(cfn_template, cloudtrail_events):
                 remediation.get("confidence") if isinstance(remediation, dict) else None,
             )
 
-            return updated_template
+            return {primary_path: updated_template}
 
         except ClientError as e:
             last_err = e
@@ -447,6 +493,31 @@ def invoke_bedrock(cfn_template, cloudtrail_events):
             raise
 
     raise RuntimeError(f"Bedrock failed after {max_attempts} attempts: {last_err}")
+
+
+def assume_cross_account_role(role_arn, external_id, session_name):
+    resp = sts_client.assume_role(
+        RoleArn=role_arn,
+        RoleSessionName=f"drift-{session_name[:32]}",
+        ExternalId=external_id,
+        DurationSeconds=3600,
+    )
+    return resp["Credentials"]
+
+
+def _get_secret(secret_arn):
+    if not secret_arn:
+        return None
+    if secret_arn not in _secret_cache:
+        try:
+            resp = secretsmanager.get_secret_value(SecretId=secret_arn)
+            secret = json.loads(resp["SecretString"])
+            _secret_cache[secret_arn] = secret.get("token") or secret.get("api_key")
+        except Exception as e:
+            logger.warning("Could not fetch secret %s: %s", secret_arn, e)
+            return None
+    return _secret_cache[secret_arn]
+
 
 def invoke_validator(tenant, stack_name, cloudtrail_event,
                      original_files, updated_files, primary_path):
