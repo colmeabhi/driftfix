@@ -61,14 +61,16 @@ def invoke_validator(lam, tenant_id, event_id, github_repo):
     ct_event["eventID"] = event_id
 
     payload = {
-        "tenant_id":        tenant_id,
-        "event_id":         event_id,
-        "updated_template": VALID_CFN_TEMPLATE,
-        "original_template": VALID_CFN_TEMPLATE,
-        "stack_name":       "e2e-test-stack",
-        "cloudtrail_event": ct_event,
-        "github_repo":      github_repo,
-        "retry_count":      0,
+        "tenant_id":               tenant_id,
+        "event_id":                event_id,
+        "updated_files":           {"template.yaml": VALID_CFN_TEMPLATE},
+        "original_files":          {"template.yaml": VALID_CFN_TEMPLATE},
+        "primary_path":            "template.yaml",
+        "stack_name":              "e2e-test-stack",
+        "cloudtrail_event":        ct_event,
+        "github_repo":             github_repo,
+        "github_token_secret_arn": "",
+        "retry_count":             0,
     }
 
     print("\n[1] Invoking Validator Lambda…")
@@ -93,7 +95,7 @@ def invoke_validator(lam, tenant_id, event_id, github_repo):
 
 def check_s3(s3, tenant_id, event_id):
     print("\n[2] Checking S3 audit bucket for stored template…")
-    key = f"validated/{tenant_id}/{event_id}.yaml"
+    key = f"validated/{tenant_id}/{event_id}/template.yaml"
     try:
         obj = s3.get_object(Bucket=AUDIT_BUCKET, Key=key)
         content = obj["Body"].read().decode()
@@ -132,11 +134,14 @@ def check_pr_creator_directly(lam, tenant_id, event_id, github_repo, s3_key):
     ct_event["eventID"] = event_id
 
     payload = {
-        "tenant_id":        tenant_id,
-        "event_id":         event_id,
-        "github_repo":      github_repo,
-        "cloudtrail_event": ct_event,
-        "template_s3_key":  s3_key,
+        "tenant_id":               tenant_id,
+        "event_id":                event_id,
+        "stack_name":              "e2e-test-stack",
+        "primary_path":            "template.yaml",
+        "github_repo":             github_repo,
+        "github_token_secret_arn": "",
+        "cloudtrail_event":        ct_event,
+        "updated_s3_keys":         {"template.yaml": s3_key},
     }
     resp = lam.invoke(
         FunctionName=PR_CREATOR_FN,
@@ -162,7 +167,6 @@ def main():
     args = parser.parse_args()
 
     event_id = str(uuid.uuid4())
-    s3_key   = f"validated/{args.tenant_id}/{event_id}.yaml"
 
     print(f"\nDrift Detector — End-to-End Test")
     print(f"  tenant_id : {args.tenant_id}")
@@ -179,7 +183,7 @@ def main():
     if args.skip_pr:
         print("\n--skip-pr set, stopping before PR Creator.")
     else:
-        check_pr_creator_directly(lam, args.tenant_id, event_id, args.github_repo, s3_key)
+        wait_for_pr(ddb, args.tenant_id, event_id)
 
     print("\nAll checks passed.\n")
 
