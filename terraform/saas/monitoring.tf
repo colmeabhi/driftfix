@@ -132,11 +132,55 @@ resource "aws_cloudwatch_dashboard" "main" {
           ]
         }
       },
-      # Row 3: Concurrent executions (full width, stacked — shows scaling)
+      # Row 3: Duration p95 (left) | Throughput events/min (right)
       {
         type   = "metric"
         x      = 0
         y      = 12
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Lambda Duration p95 (ms)"
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          period  = 300
+          stat    = "p95"
+          metrics = [
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-processor"],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-stack-processor"],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-validator"],
+            ["AWS/Lambda", "Duration", "FunctionName", "${var.project}-pr-creator"],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 12
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Pipeline Throughput (events/min)"
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          period  = 300
+          metrics = [
+            [{ expression = "iv/5", label = "validator (events/min)",        id = "tv" }],
+            [{ expression = "is/5", label = "stack-processor (events/min)",  id = "ts" }],
+            [{ expression = "ip/5", label = "processor (events/min)",        id = "tp" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-validator",        { id = "iv", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-stack-processor",  { id = "is", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-processor",        { id = "ip", visible = false, stat = "Sum" }],
+          ]
+        }
+      },
+      # Row 4: Concurrent executions (full width, stacked — shows scaling)
+      {
+        type   = "metric"
+        x      = 0
+        y      = 18
         width  = 18
         height = 6
         properties = {
@@ -154,11 +198,11 @@ resource "aws_cloudwatch_dashboard" "main" {
           ]
         }
       },
-      # Row 3 right: DLQ depth
+      # Row 4 right: DLQ depth
       {
         type   = "metric"
         x      = 18
-        y      = 12
+        y      = 18
         width  = 6
         height = 6
         properties = {
@@ -230,6 +274,25 @@ resource "aws_cloudwatch_metric_alarm" "processor_near_timeout" {
   extended_statistic  = "p99"
   threshold           = 720000 # 720 s in ms = 80% of 900 s timeout
   alarm_description   = "Processor Lambda p99 duration exceeded 80% of its 15-min timeout"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+
+  dimensions = {
+    FunctionName = "${var.project}-processor"
+  }
+}
+
+# Processor p95 duration > 67% of its 900s timeout — early warning before p99 fires.
+resource "aws_cloudwatch_metric_alarm" "processor_near_timeout_p95" {
+  alarm_name          = "${var.project}-processor-near-timeout-p95"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Duration"
+  namespace           = "AWS/Lambda"
+  period              = 3600
+  extended_statistic  = "p95"
+  threshold           = 600000 # 600 s in ms = 67% of 900 s timeout
+  alarm_description   = "Processor Lambda p95 duration exceeded 67% of its 15-min timeout — early warning"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
 
@@ -314,4 +377,105 @@ resource "aws_cloudwatch_metric_alarm" "processor_throttles" {
   dimensions = {
     FunctionName = "${var.project}-processor"
   }
+}
+
+# ── Cost Estimation Dashboard ─────────────────────────────────────────────────
+# Estimates Lambda compute cost in USD using published us-east-1 pricing:
+#   Requests : $0.20 per 1M  →  $2e-7 per invocation
+#   Duration : $0.0000166667 per GB-second
+#     processor / stack-processor : 512 MB = 0.5 GB  → $8.333e-9 per ms
+#     validator / pr-creator      : 256 MB = 0.25 GB → $4.167e-9 per ms
+#
+# Formula per Lambda:
+#   cost = invocations * 2e-7 + duration_sum_ms * price_per_ms
+#
+# Figures are estimates only — they exclude free-tier, data transfer, Secrets
+# Manager, DynamoDB, S3, and SNS costs.
+
+resource "aws_cloudwatch_dashboard" "cost" {
+  dashboard_name = "${var.project}-cost"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      # Row 1: Per-Lambda estimated hourly cost
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 24
+        height = 6
+        properties = {
+          title   = "Estimated Lambda Cost per Hour (USD)"
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          period  = 3600
+          metrics = [
+            [{ expression = "ip*2e-7 + dp*8.333e-9", label = "processor (USD/hr)",        id = "cp" }],
+            [{ expression = "is*2e-7 + ds*8.333e-9", label = "stack-processor (USD/hr)",  id = "cs" }],
+            [{ expression = "iv*2e-7 + dv*4.167e-9", label = "validator (USD/hr)",         id = "cv" }],
+            [{ expression = "ic*2e-7 + dc*4.167e-9", label = "pr-creator (USD/hr)",        id = "cc" }],
+            [{ expression = "cp+cs+cv+cc",            label = "TOTAL (USD/hr)",             id = "total" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-processor",       { id = "ip", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-stack-processor", { id = "is", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-validator",        { id = "iv", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-pr-creator",       { id = "ic", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-processor",       { id = "dp", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-stack-processor", { id = "ds", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-validator",        { id = "dv", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-pr-creator",       { id = "dc", visible = false, stat = "Sum" }],
+          ]
+        }
+      },
+      # Row 2: Cumulative 24-hour cost (singleValue) | Invocation count breakdown
+      {
+        type   = "metric"
+        x      = 0
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Estimated Lambda Cost — Last 24 Hours (USD)"
+          view    = "singleValue"
+          region  = var.aws_region
+          period  = 86400
+          metrics = [
+            [{ expression = "ip24*2e-7 + dp24*8.333e-9", label = "processor",        id = "cp24" }],
+            [{ expression = "is24*2e-7 + ds24*8.333e-9", label = "stack-processor",  id = "cs24" }],
+            [{ expression = "iv24*2e-7 + dv24*4.167e-9", label = "validator",         id = "cv24" }],
+            [{ expression = "ic24*2e-7 + dc24*4.167e-9", label = "pr-creator",        id = "cc24" }],
+            [{ expression = "cp24+cs24+cv24+cc24",        label = "TOTAL",             id = "total24" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-processor",       { id = "ip24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-stack-processor", { id = "is24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-validator",        { id = "iv24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-pr-creator",       { id = "ic24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-processor",       { id = "dp24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-stack-processor", { id = "ds24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-validator",        { id = "dv24", visible = false, stat = "Sum" }],
+            ["AWS/Lambda", "Duration",    "FunctionName", "${var.project}-pr-creator",       { id = "dc24", visible = false, stat = "Sum" }],
+          ]
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 6
+        width  = 12
+        height = 6
+        properties = {
+          title   = "Invocation Count — Last 24 Hours"
+          view    = "singleValue"
+          region  = var.aws_region
+          period  = 86400
+          stat    = "Sum"
+          metrics = [
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-processor",       { label = "processor" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-stack-processor", { label = "stack-processor" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-validator",        { label = "validator" }],
+            ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-pr-creator",       { label = "pr-creator" }],
+          ]
+        }
+      },
+    ]
+  })
 }
