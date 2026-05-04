@@ -39,9 +39,24 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
 resource "aws_cloudtrail" "main" {
   name                          = "${var.project}-trail"
   s3_bucket_name                = aws_s3_bucket.cloudtrail.bucket
+  # s3_key_prefix                 = "write-mgmt"
   include_global_service_events = true
   is_multi_region_trail         = true
   enable_log_file_validation    = true
+
+  advanced_event_selector {
+    name = "Log write-only management events"
+
+    field_selector {
+      field  = "eventCategory"
+      equals = ["Management"]
+    }
+
+    field_selector {
+      field  = "readOnly"
+      equals = ["false"]
+    }
+  }
 
   depends_on = [aws_s3_bucket_policy.cloudtrail]
 }
