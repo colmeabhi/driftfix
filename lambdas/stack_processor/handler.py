@@ -38,7 +38,10 @@ bedrock_runtime = boto3.client("bedrock-runtime", region_name=os.environ.get("AW
 
 RECONCILIATIONS_TABLE   = os.environ["DYNAMODB_RECONCILIATIONS_TABLE"]
 VALIDATOR_FUNCTION_NAME = os.environ["VALIDATOR_FUNCTION_NAME"]
-BEDROCK_MODEL_ID        = os.environ.get("BEDROCK_MODEL_ID", "")
+BEDROCK_MODEL_ID        = os.environ.get("BEDROCK_MODEL_ID", "").strip()
+
+# INTERIM: Gemini — remove when switching to Bedrock
+GEMINI_API_KEY_SECRET_ARN = os.environ.get("GEMINI_API_KEY_SECRET_ARN", "")
 
 _secret_cache = {}
 
@@ -66,6 +69,7 @@ def lambda_handler(event, context):
     # primary_path = the template file path (None if CFn fallback was used)
     files, primary_path = fetch_files(creds, stack_name, region, github_token, github_repo)
 
+    # updated_files = only the files the LLM changed (subset of files keys)
     updated_files = invoke_bedrock(files, cloudtrail_events)
 
     invoke_validator(tenant, stack_name, cloudtrail_events[0],
@@ -348,10 +352,6 @@ def _extract_json(text):
     return text
 
 
-def _norm(s):
-    return re.sub(r"[-_\s]", "", s).lower()
-
-
 def _is_cfn(content):
     return bool(content) and (
         "AWSTemplateFormatVersion" in content
@@ -360,26 +360,28 @@ def _is_cfn(content):
     )
 
 
+def _norm(s):
+    return re.sub(r"[-_\s]", "", s).lower()
+
+
 def invoke_bedrock(files, cloudtrail_events):
     """
-    Send the primary CFn template to Bedrock and return updated_files dict.
-    files = {repo_path: content} — template + any parameter files.
-    Returns {primary_path: updated_content} with only the changed file.
+    Calls Bedrock converse with the original invoke_bedrock prompt (JSON output schema).
+    Inputs:  files = {path: content}, cloudtrail_events = list of CloudTrail records.
+    Returns: {path: updated_content} — same shape expected by invoke_validator.
+    Model is read from BEDROCK_MODEL_ID env var.
     """
     if not BEDROCK_MODEL_ID:
-        raise RuntimeError("BEDROCK_MODEL_ID is not configured")
+        raise RuntimeError("BEDROCK_MODEL_ID env var is not set")
 
-    # Find the primary CFn template (first file that looks like a CFn template)
-    primary_path = next(
-        (p for p, c in files.items() if _is_cfn(c)),
-        next(iter(files)),
-    )
+    # Use the primary (first) file as the template string for the prompt
+    primary_path = next(iter(files))
     cfn_template = files[primary_path]
 
     evidence = {
         "region": cloudtrail_events[0].get("awsRegion", "unknown") if cloudtrail_events else "unknown",
         "event_count": len(cloudtrail_events),
-        "events": cloudtrail_events[:50],  # cap to avoid huge prompts
+        "events": cloudtrail_events[:50],
         "note": "Only use the evidence provided; do not invent changes.",
     }
 
@@ -404,15 +406,7 @@ def invoke_bedrock(files, cloudtrail_events):
         "evidence": evidence,
     }
 
-    prompt_text = instructions + "\nINPUT:\n" + json.dumps(user_input)
-
-    # Amazon Nova Converse-style request format
-    request_body = {
-        "messages": [
-            {"role": "user", "content": [{"text": prompt_text}]}
-        ],
-        "inferenceConfig": {"maxTokens": 4096},
-    }
+    prompt = instructions + "\nINPUT:\n" + json.dumps(user_input)
 
     max_attempts = 4
     base_sleep = 0.6
@@ -421,26 +415,30 @@ def invoke_bedrock(files, cloudtrail_events):
 
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = bedrock_runtime.invoke_model(
+            resp = bedrock_runtime.converse(
                 modelId=BEDROCK_MODEL_ID,
-                body=json.dumps(request_body),
-                contentType="application/json",
-                accept="application/json",
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                inferenceConfig={"maxTokens": 8192, "temperature": 0.15},
             )
-            raw = resp["body"].read()
-            data = json.loads(raw)
 
-            # Amazon Nova response: {"output": {"message": {"content": [{"text": "..."}]}}}
-            model_text = None
-            try:
-                model_text = data["output"]["message"]["content"][0]["text"]
-            except (KeyError, IndexError, TypeError):
-                pass
+            # Extract text from converse response: output.message.content[].text
+            msg = (resp or {}).get("output", {}).get("message") or {}
+            blocks = msg.get("content") or []
+            model_text = "".join(
+                b["text"] for b in blocks
+                if isinstance(b, dict) and isinstance(b.get("text"), str)
+            ).strip()
 
             if not model_text:
-                raise RuntimeError(f"Could not extract model text from Bedrock response: {json.dumps(data)[:1000]}")
+                raise RuntimeError("Bedrock converse returned empty assistant text")
 
-            model_text = _extract_json(model_text)
+            # Strip markdown fences the model may add
+            if model_text.startswith("```json"):
+                model_text = model_text[len("```json"):].strip()
+            if model_text.startswith("```"):
+                model_text = model_text[len("```"):].strip()
+            if model_text.endswith("```"):
+                model_text = model_text[:-3].strip()
 
             result = json.loads(model_text)
 
@@ -451,13 +449,14 @@ def invoke_bedrock(files, cloudtrail_events):
             elapsed_ms = int((time.perf_counter() - start) * 1000)
             remediation = result.get("remediation", {})
             logger.info(
-                "Bedrock success tenant_stack invoke attempt=%d latency_ms=%d manual_review=%s confidence=%s",
-                attempt,
-                elapsed_ms,
+                "Bedrock converse ok model=%s attempt=%d latency_ms=%d "
+                "manual_review=%s confidence=%s",
+                BEDROCK_MODEL_ID, attempt, elapsed_ms,
                 remediation.get("manual_review_required") if isinstance(remediation, dict) else None,
                 remediation.get("confidence") if isinstance(remediation, dict) else None,
             )
 
+            # Return as {path: content} dict to match the validator contract
             return {primary_path: updated_template}
 
         except ClientError as e:
@@ -481,15 +480,6 @@ def invoke_bedrock(files, cloudtrail_events):
                 continue
 
             logger.error("Bedrock non-retryable error code=%s status=%s err=%s", code, status, str(e))
-            raise
-
-        except Exception as e:
-            last_err = e
-            if attempt < max_attempts:
-                sleep_s = base_sleep * (2 ** (attempt - 1)) + random.random() * 0.2
-                logger.warning("Bedrock unexpected error attempt=%d sleep=%.2fs err=%s", attempt, sleep_s, str(e))
-                time.sleep(sleep_s)
-                continue
             raise
 
     raise RuntimeError(f"Bedrock failed after {max_attempts} attempts: {last_err}")
