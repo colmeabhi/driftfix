@@ -151,7 +151,7 @@ def open_pull_request(token, repo, branch_name, files, cloudtrail_event, stack_n
     # Move branch ref forward
     github_request(token, "PATCH",
         f"/repos/{owner}/{repo_name}/git/refs/heads/{branch_name}",
-        {"sha": new_commit["sha"]},
+        {"sha": new_commit["sha"], "force": True},
     )
 
     # Open PR (idempotent)
@@ -168,7 +168,17 @@ def open_pull_request(token, repo, branch_name, files, cloudtrail_event, stack_n
         if e.code == 422:
             prs = github_request(token, "GET",
                 f"/repos/{owner}/{repo_name}/pulls?head={owner}:{branch_name}&state=open")
-            return prs[0]["html_url"] if prs else branch_name
+            if prs:
+                return prs[0]["html_url"]
+            # PR was closed/merged between our create attempt and the lookup —
+            # check merged PRs too before giving up
+            prs_closed = github_request(token, "GET",
+                f"/repos/{owner}/{repo_name}/pulls?head={owner}:{branch_name}&state=closed")
+            if prs_closed:
+                return prs_closed[0]["html_url"]
+            raise RuntimeError(
+                f"422 from GitHub but no open or closed PR found for branch {branch_name}"
+            )
         raise
 
 
