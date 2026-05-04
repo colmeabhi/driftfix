@@ -100,7 +100,7 @@ def assume_cross_account_role(role_arn, external_id, session_name):
 
 def list_cloudtrail_logs(creds, bucket):
     s3 = _s3_client(creds)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=int(os.environ.get("LOOKBACK_HOURS", "24")))
     keys = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix="AWSLogs/"):
@@ -169,14 +169,18 @@ def group_events_by_stack(creds, events):
 
 def mark_events_queued(tenant_id, events):
     table = dynamodb.Table(RECONCILIATIONS_TABLE)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    # TTL: 48h from now — if stack processor never completes, the record expires
+    # and the event will be picked up again on the next batch run.
+    expire_at = int((now + timedelta(hours=48)).timestamp())
     with table.batch_writer() as batch:
         for event in events:
             batch.put_item(Item={
                 "tenant_id": tenant_id,
                 "event_id": event["eventID"],
                 "status": "queued",
-                "queued_at": now,
+                "queued_at": now.isoformat(),
+                "expires_at": expire_at,
             })
 
 
