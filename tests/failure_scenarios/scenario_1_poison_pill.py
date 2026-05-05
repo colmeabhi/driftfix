@@ -9,44 +9,60 @@ Rubric item  : "Intentionally trigger failure scenario; show system behavior,
 
 What happens
 ------------
-A CloudFormation template with a structural error (resource missing `Type`)
-is sent to the Validator Lambda.  cfn-lint detects the problem and returns
-lint errors.  Because retry_count is already at MAX_RETRIES (3), the Lambda
-raises RuntimeError instead of re-invoking the Stack Processor.
+A CloudFormation template with four cfn-lint violations is sent to the
+Validator Lambda.  The script emulates Lambda's async invocation behavior:
+1 original delivery + 2 automatic retries, each carrying retry_count=0
+(Lambda re-delivers the original event payload unchanged on every attempt).
 
-  cfn-lint errors → RuntimeError → Lambda FunctionError
-                                 ↓  (in the real async pipeline)
-                    Stack Processor (caller) fails → SQS DLQ ← alarm fires
+Because retry_count=0 < MAX_RETRIES=3 and lint errors are present, the
+Validator raises NotImplementedError on every attempt — the Bedrock-powered
+retry-and-fix loop is not yet implemented.
+
+  cfn-lint violations → NotImplementedError → FunctionError  (×3 attempts)
+                        ↓  after all retries exhausted
+                        script routes event to SQS DLQ  ← alarm fires
+
+After all 3 attempts fail the script writes a RetriesExhausted message to
+the SQS DLQ (drift-detector-processor-dlq), matching the structure Lambda
+uses for its on_failure async destination.
 
 Recovery mechanism
 ------------------
 1. Note the event_id printed by the trigger step.
-2. Inspect the DLQ (in the real pipeline, the stranded message will be there).
-3. Fix the template and re-invoke the Validator with the same event_id and
-   retry_count=0 (--recover --event-id <id>).
+2. Inspect the DLQ:
+     aws sqs receive-message --queue-url <url> --max-number-of-messages 1
+3. Fix the template and re-invoke with the same event_id:
+     python tests/failure_scenarios/scenario_1_poison_pill.py \\
+       --recover --event-id <id-from-step-1>
 4. Confirm the Validator returns status=passed for the same event.
-5. Confirm Lambda/Errors metric returns to 0.
-6. Delete the DLQ message once the event is successfully re-processed.
+5. Confirm Lambda/Errors metric returns to 0 (may take up to 5 min).
+6. Drain the DLQ once the event is successfully re-processed:
+     aws sqs purge-queue --queue-url <url>
 
 Monitoring evidence (CloudWatch dashboard: drift-detector-overview)
 -------------------------------------------------------------------
-- Lambda Errors widget: spike on drift-detector-validator
-- DLQ Depth widget: rises in the real async pipeline when Stack Processor
-  fails after receiving the Validator's FunctionError
-- Alarm: drift-detector-validator-errors fires (threshold = 0)
-- Post-recovery: Lambda Errors returns to 0
+- Lambda Errors widget : spike of 3 FunctionErrors on drift-detector-validator
+- DLQ Depth widget     : 1 message visible (written by this script after
+                         retries are exhausted)
+- Alarm                : drift-detector-validator-errors fires (threshold = 0)
+- Post-recovery        : Lambda Errors returns to 0; DLQ depth returns to 0
 
 Usage
 -----
   export AWS_PROFILE=<your-profile>
 
-  # Step 1 — trigger the failure:
+  # Step 1 — trigger the failure (1 original + 2 async retries → DLQ):
   python tests/failure_scenarios/scenario_1_poison_pill.py
   # Note the event_id printed at the end.
 
-  # Step 2 — recover the same event:
+  # Step 2 — recover the same event with the fixed template:
   python tests/failure_scenarios/scenario_1_poison_pill.py \\
     --recover --event-id <id-from-step-1>
+
+  # Optional flags:
+  #   --retry-delay <secs>   base seconds between retry attempts (default: 5;
+  #                          production Lambda uses ~60-120 s)
+  #   --no-evidence          skip the 90-second CloudWatch polling wait
 """
 
 import argparse
@@ -124,8 +140,10 @@ CLOUDTRAIL_EVENT = {
     "requestParameters": {"bucketName": "test-bucket"},
 }
 
-TENANT_ID  = "failure-test-tenant"
-STACK_NAME = "failure-test-stack"
+TENANT_ID          = "failure-test-tenant"
+STACK_NAME         = "failure-test-stack"
+MAX_ASYNC_RETRIES  = 2    # Lambda retries async invocations twice before routing to DLQ
+RETRY_DELAY_SECS   = 5    # seconds between retries (production Lambda: ~60-120s)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -167,12 +185,40 @@ def _check_dlq(sqs):
         url = sqs.get_queue_url(QueueName=DLQ_NAME)["QueueUrl"]
         attrs = sqs.get_queue_attributes(
             QueueUrl=url,
-            AttributeNames=["ApproximateNumberOfMessagesVisible"],
+            AttributeNames=["ApproximateNumberOfMessages"],
         )
-        return int(attrs["Attributes"].get("ApproximateNumberOfMessagesVisible", 0)), url
+        return int(attrs["Attributes"].get("ApproximateNumberOfMessages", 0)), url
     except ClientError as e:
         print(f"  [WARN] Could not query DLQ: {e}")
         return None, None
+
+
+def _send_to_dlq(sqs, event_payload, error_msg, invoke_count):
+    """
+    Emulate Lambda's on_failure destination routing after retries are exhausted.
+    Sends a message to the SQS DLQ matching the structure Lambda uses for
+    async invocation failures.
+    """
+    try:
+        url = sqs.get_queue_url(QueueName=DLQ_NAME)["QueueUrl"]
+        message = {
+            "version": "1.0",
+            "condition": "RetriesExhausted",
+            "approximateInvokeCount": invoke_count,
+            "requestContext": {
+                "functionArn": f"arn:aws:lambda:{REGION}::function:{VALIDATOR_FN}",
+                "error": error_msg,
+            },
+            "requestPayload": event_payload,
+        }
+        sqs.send_message(QueueUrl=url, MessageBody=json.dumps(message))
+        print(f"  → Event routed to SQS DLQ ({DLQ_NAME})")
+        print(f"    approximateInvokeCount = {invoke_count}  "
+              f"(1 original + {invoke_count - 1} retries)")
+        return url
+    except ClientError as e:
+        print(f"  [WARN] Could not send to DLQ: {e}")
+        return None
 
 
 def _build_payload(event_id, template, retry_count):
@@ -191,32 +237,47 @@ def _build_payload(event_id, template, retry_count):
 
 # ── Trigger ───────────────────────────────────────────────────────────────────
 
-def run_trigger(lam):
-    _section("TRIGGER — sending poison pill to Validator Lambda")
+def run_trigger(lam, sqs, retry_delay_secs=RETRY_DELAY_SECS):
+    _section("TRIGGER — poison pill + emulated async pipeline retry behavior")
 
     event_id = str(uuid.uuid4())
-    payload  = _build_payload(event_id, BROKEN_TEMPLATE, retry_count=3)
+    # retry_count=0: in the real async pipeline Lambda re-delivers the original
+    # event unchanged on each retry — it does not increment retry_count.
+    payload  = _build_payload(event_id, BROKEN_TEMPLATE, retry_count=0)
 
     print(f"  event_id   : {event_id}")
-    print(f"  retry_count: 3 (== MAX_RETRIES → RuntimeError path)")
-    print(f"  template   : BROKEN (missing resource Type field)")
+    print(f"  retry_count: 0  (Lambda re-delivers original event on each retry)")
+    print(f"  template   : BROKEN (cfn-lint violations)")
+    print(f"  retry_delay: {retry_delay_secs}s between attempts  "
+          f"(production Lambda: ~60-120s)")
 
-    body, function_error = _invoke(lam, payload, "broken template")
+    last_error = None
+    for attempt in range(MAX_ASYNC_RETRIES + 1):
+        label = ("original delivery" if attempt == 0
+                 else f"async retry {attempt}/{MAX_ASYNC_RETRIES}")
+        body, function_error = _invoke(lam, payload, label)
 
-    if function_error:
-        print(f"\n  [EXPECTED] FunctionError = {function_error!r}")
-        print(f"  Error message: {body.get('errorMessage', str(body))}")
-        print(f"\n  ✓ Failure triggered successfully.")
-        print(f"    In the async pipeline, the Stack Processor (caller) receives this")
-        print(f"    FunctionError, fails itself, and its on_failure destination routes")
-        print(f"    the event to the SQS DLQ (drift-detector-processor-dlq).")
-    else:
-        print(f"\n  [UNEXPECTED] Lambda returned success: {body}")
-        print(f"  Check cfn-lint is installed in the Lambda layer.")
-        sys.exit(1)
+        if not function_error:
+            print(f"\n  [UNEXPECTED] Attempt {attempt + 1} succeeded: {body}")
+            print(f"  The broken template should have failed cfn-lint validation.")
+            sys.exit(1)
+
+        last_error = body.get("errorMessage", str(body))
+        print(f"\n  [EXPECTED] Attempt {attempt + 1} — FunctionError")
+        print(f"  Error: {last_error[:120]}")
+
+        if attempt < MAX_ASYNC_RETRIES:
+            print(f"  Waiting {retry_delay_secs}s before retry {attempt + 1} "
+                  f"(emulating Lambda exponential backoff)…")
+            time.sleep(retry_delay_secs)
+
+    print(f"\n  ✓ All {MAX_ASYNC_RETRIES + 1} delivery attempt(s) failed "
+          f"(1 original + {MAX_ASYNC_RETRIES} retries).")
+    print(f"  Emulating Lambda on_failure destination → SQS DLQ…")
+    _send_to_dlq(sqs, payload, last_error, MAX_ASYNC_RETRIES + 1)
 
     print(f"\n  ── Next step ──────────────────────────────────────────")
-    print(f"  Run the recovery step with the same event_id to close the loop:")
+    print(f"  Run the recovery step to replay the fixed template:")
     print(f"  python tests/failure_scenarios/scenario_1_poison_pill.py \\")
     print(f"    --recover --event-id {event_id}")
     print(f"  ────────────────────────────────────────────────────────")
@@ -328,6 +389,9 @@ def main():
                         help="Run the recovery step (use with --event-id to close the loop).")
     parser.add_argument("--event-id", default="",
                         help="event_id printed by the trigger run; ties recovery to the same event.")
+    parser.add_argument("--retry-delay", type=int, default=RETRY_DELAY_SECS,
+                        help=f"Seconds between async retry attempts (default: {RETRY_DELAY_SECS}; "
+                             f"production Lambda: ~60-120s).")
     parser.add_argument("--no-evidence", action="store_true",
                         help="Skip the 90-second CloudWatch polling wait.")
     args = parser.parse_args()
@@ -345,7 +409,7 @@ def main():
         if not args.no_evidence:
             show_recovery_evidence(cw, sqs)
     else:
-        run_trigger(lam)
+        run_trigger(lam, sqs, args.retry_delay)
         if not args.no_evidence:
             show_trigger_evidence(cw, sqs)
 

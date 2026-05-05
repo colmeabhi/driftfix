@@ -482,6 +482,14 @@ resource "aws_cloudwatch_metric_alarm" "processor_throttles" {
 # Formula per Lambda:
 #   cost = invocations * 2e-7 + duration_sum_ms * price_per_ms
 #
+# The time-series widget (Row 1) uses period=3600 so each point shows cost for
+# one hourly bucket; it naturally follows the dashboard time-range window.
+#
+# The singleValue widgets (Row 2) use setPeriodToTimeRange=true so they sum
+# all invocations and duration across the entire selected time range and report
+# total cost for that window.  Changing the dashboard time range (1 h, 3 h,
+# 1 d, 3 d, 1 w, custom) automatically updates both total-cost numbers.
+#
 # Figures are estimates only — they exclude free-tier, data transfer, Secrets
 # Manager, DynamoDB, S3, and SNS costs.
 
@@ -520,7 +528,10 @@ resource "aws_cloudwatch_dashboard" "cost" {
           ]
         }
       },
-      # Row 2: Cumulative 24-hour cost (singleValue) | Invocation count breakdown
+      # Row 2: Cumulative cost (singleValue) | Invocation count breakdown
+      # setPeriodToTimeRange=true aggregates over the entire dashboard time window
+      # so these totals automatically reflect 1 h / 3 h / 1 d / 3 d / 1 w / custom
+      # selections — no hardcoded period.
       {
         type   = "metric"
         x      = 0
@@ -528,10 +539,10 @@ resource "aws_cloudwatch_dashboard" "cost" {
         width  = 12
         height = 6
         properties = {
-          title   = "Estimated Lambda Cost — Last 24 Hours (USD)"
-          view    = "singleValue"
-          region  = var.aws_region
-          period  = 86400
+          title                = "Estimated Total Lambda Cost — Selected Period (USD)"
+          view                 = "singleValue"
+          region               = var.aws_region
+          setPeriodToTimeRange = true
           metrics = [
             [{ expression = "ip24*2e-7 + dp24*8.333e-9", label = "processor",        id = "cp24" }],
             [{ expression = "is24*2e-7 + ds24*8.333e-9", label = "stack-processor",  id = "cs24" }],
@@ -556,11 +567,11 @@ resource "aws_cloudwatch_dashboard" "cost" {
         width  = 12
         height = 6
         properties = {
-          title   = "Invocation Count — Last 24 Hours"
-          view    = "singleValue"
-          region  = var.aws_region
-          period  = 86400
-          stat    = "Sum"
+          title                = "Invocation Count — Selected Period"
+          view                 = "singleValue"
+          region               = var.aws_region
+          setPeriodToTimeRange = true
+          stat                 = "Sum"
           metrics = [
             ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-processor",       { label = "processor" }],
             ["AWS/Lambda", "Invocations", "FunctionName", "${var.project}-stack-processor", { label = "stack-processor" }],
