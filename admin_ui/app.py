@@ -1,5 +1,5 @@
 """
-Drift Detector — Tenant Admin UI
+Drift Detector — Tenant Admin UI + Customer Self-Service Portal
 Run: uvicorn app:app --reload --port 8000
 Requires AWS credentials in environment (same profile used for Terraform).
 """
@@ -7,23 +7,40 @@ Requires AWS credentials in environment (same profile used for Terraform).
 import os
 import secrets
 import textwrap
+from pathlib import Path
+
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import FastAPI, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-app = FastAPI()
+app = FastAPI(title="Drift Detector")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 REGION  = os.environ.get("AWS_REGION", "us-east-1")
 TABLE   = os.environ.get("TENANTS_TABLE", "drift-detector-tenants")
 PROJECT = os.environ.get("PROJECT", "drift-detector")
 
-dynamodb        = boto3.resource("dynamodb", region_name=REGION)
-secretsmanager  = boto3.client("secretsmanager", region_name=REGION)
-table           = dynamodb.Table(TABLE)
-SAAS_ACCOUNT_ID = boto3.client("sts", region_name=REGION).get_caller_identity()["Account"]
+dynamodb       = boto3.resource("dynamodb", region_name=REGION)
+secretsmanager = boto3.client("secretsmanager", region_name=REGION)
+sts_client     = boto3.client("sts", region_name=REGION)
+table          = dynamodb.Table(TABLE)
+SAAS_ACCOUNT_ID = sts_client.get_caller_identity()["Account"]
 
-CROSS_ACCOUNT_ROLE_NAME = "drift-detector-cross-account"
+CROSS_ACCOUNT_ROLE_NAME  = "drift-detector-cross-account"
+CLOUDTRAIL_BUCKET_PREFIX = "drift-detector-cloudtrail"
+
+PORTAL_BUILD = Path(__file__).parent.parent / "ui" / "customer-portal" / "dist"
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -38,15 +55,68 @@ def _all_tenants():
     return sorted(items, key=lambda x: x["tenant_id"])
 
 
-def _cfn_template(tenant_id: str, external_id: str, cloudtrail_bucket: str) -> str:
+def _cfn_template(tenant_id: str, external_id: str) -> str:
+    """All-in-one CloudFormation template: S3 bucket + CloudTrail trail + cross-account IAM role."""
+    bucket_name = f"{CLOUDTRAIL_BUCKET_PREFIX}-{tenant_id}"
     return textwrap.dedent(f"""\
         AWSTemplateFormatVersion: '2010-09-09'
         Description: >
-          Drift Detector cross-account access for tenant {tenant_id}.
-          Deploy this stack in AWS account {tenant_id} to allow the Drift Detector
-          (account {SAAS_ACCOUNT_ID}) to monitor your CloudFormation stacks.
+          Drift Detector full setup for tenant {tenant_id}.
+          Deploy this stack in AWS account {tenant_id} to enable IaC drift monitoring
+          by Drift Detector SaaS (account {SAAS_ACCOUNT_ID}).
 
         Resources:
+
+          CloudTrailBucket:
+            Type: AWS::S3::Bucket
+            Properties:
+              BucketName: {bucket_name}
+              BucketEncryption:
+                ServerSideEncryptionConfiguration:
+                  - ServerSideEncryptionByDefault:
+                      SSEAlgorithm: AES256
+              LifecycleConfiguration:
+                Rules:
+                  - Id: ExpireOldLogs
+                    Status: Enabled
+                    ExpirationInDays: 90
+
+          CloudTrailBucketPolicy:
+            Type: AWS::S3::BucketPolicy
+            Properties:
+              Bucket: !Ref CloudTrailBucket
+              PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                  - Sid: AWSCloudTrailAclCheck
+                    Effect: Allow
+                    Principal:
+                      Service: cloudtrail.amazonaws.com
+                    Action: s3:GetBucketAcl
+                    Resource: !GetAtt CloudTrailBucket.Arn
+                  - Sid: AWSCloudTrailWrite
+                    Effect: Allow
+                    Principal:
+                      Service: cloudtrail.amazonaws.com
+                    Action: s3:PutObject
+                    Resource: !Sub "${{CloudTrailBucket.Arn}}/AWSLogs/{tenant_id}/*"
+                    Condition:
+                      StringEquals:
+                        s3:x-amz-acl: bucket-owner-full-control
+
+          DriftDetectorTrail:
+            Type: AWS::CloudTrail::Trail
+            DependsOn: CloudTrailBucketPolicy
+            Properties:
+              TrailName: drift-detector-trail
+              S3BucketName: !Ref CloudTrailBucket
+              IsLogging: true
+              IsMultiRegionTrail: true
+              IncludeGlobalServiceEvents: true
+              EnableLogFileValidation: true
+              EventSelectors:
+                - ReadWriteType: WriteOnly
+                  IncludeManagementEvents: true
 
           DriftDetectorRole:
             Type: AWS::IAM::Role
@@ -73,12 +143,14 @@ def _cfn_template(tenant_id: str, external_id: str, cloudtrail_bucket: str) -> s
                           - s3:GetObject
                           - s3:ListBucket
                         Resource:
-                          - arn:aws:s3:::{cloudtrail_bucket}
-                          - arn:aws:s3:::{cloudtrail_bucket}/*
+                          - !GetAtt CloudTrailBucket.Arn
+                          - !Sub "${{CloudTrailBucket.Arn}}/*"
                       - Sid: ResolveResourceTags
                         Effect: Allow
                         Action:
                           - cloudformation:GetTemplate
+                          - cloudformation:DescribeStacks
+                          - cloudformation:ListStacks
                           - ec2:DescribeTags
                           - s3:GetBucketTagging
                           - rds:DescribeDBInstances
@@ -94,13 +166,19 @@ def _cfn_template(tenant_id: str, external_id: str, cloudtrail_bucket: str) -> s
                         Resource: '*'
 
         Outputs:
-          RoleArn:
+          CrossAccountRoleArn:
             Value: !GetAtt DriftDetectorRole.Arn
-            Description: Cross-account role ARN (for reference)
+            Description: Cross-account role ARN (recorded by Drift Detector automatically)
+          CloudTrailBucketName:
+            Value: !Ref CloudTrailBucket
+            Description: CloudTrail log bucket (recorded by Drift Detector automatically)
+          ExternalId:
+            Value: {external_id}
+            Description: ExternalId embedded in the role trust policy
     """)
 
 
-# ── Shared CSS + shell ────────────────────────────────────────────────────────
+# ── Shared CSS + shell (admin UI) ─────────────────────────────────────────────
 
 _CSS = """
   *, *::before, *::after { box-sizing: border-box; }
@@ -172,7 +250,7 @@ def _page(title, body):
 </html>"""
 
 
-# ── Main page — tenant list ───────────────────────────────────────────────────
+# ── Admin UI: main page — tenant list ─────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
 async def index(flash: str = "", flash_type: str = "ok"):
@@ -184,6 +262,7 @@ async def index(flash: str = "", flash_type: str = "ok"):
               <td><code>{t['tenant_id']}</code></td>
               <td>{t.get('github_repo', '—')}</td>
               <td>{t.get('cloudtrail_bucket', '—')}</td>
+              <td><span class="badge {'badge-green' if t.get('status') == 'active' else ''}">{t.get('status', 'active')}</span></td>
               <td>
                 <form method="post" action="/tenants/{t['tenant_id']}/delete"
                       onsubmit="return confirm('Remove tenant {t['tenant_id']}?')">
@@ -195,7 +274,7 @@ async def index(flash: str = "", flash_type: str = "ok"):
         )
         table_html = f"""<table>
           <thead><tr>
-            <th>Account ID</th><th>GitHub Repo</th><th>CloudTrail Bucket</th><th></th>
+            <th>Account ID</th><th>GitHub Repo</th><th>CloudTrail Bucket</th><th>Status</th><th></th>
           </tr></thead>
           <tbody>{rows}</tbody>
         </table>"""
@@ -215,7 +294,7 @@ async def index(flash: str = "", flash_type: str = "ok"):
     return _page("Tenants", body)
 
 
-# ── Register — step 1: form ───────────────────────────────────────────────────
+# ── Admin UI: register — step 1: form ─────────────────────────────────────────
 
 @app.get("/register", response_class=HTMLResponse)
 async def register_form():
@@ -235,11 +314,6 @@ async def register_form():
               <input name="github_repo" placeholder="acme/infra" required>
             </label>
             <label class="full">
-              CloudTrail S3 Bucket
-              <span class="hint">The bucket in their account where CloudTrail writes logs</span>
-              <input name="cloudtrail_bucket" placeholder="acme-cloudtrail-logs" required>
-            </label>
-            <label class="full">
               GitHub Personal Access Token
               <span class="hint">Fine-grained PAT with Contents + Pull Requests write access on their repo</span>
               <input name="github_pat" type="password" placeholder="github_pat_..." required>
@@ -255,24 +329,22 @@ async def register_form():
     return _page("Onboard Tenant", body)
 
 
-# ── Register — step 2: save + show CFn template ───────────────────────────────
+# ── Admin UI: register — step 2: save + show CFn template ─────────────────────
 
 @app.post("/register", response_class=HTMLResponse)
 async def register_submit(
     tenant_id: str = Form(...),
     github_repo: str = Form(...),
-    cloudtrail_bucket: str = Form(...),
     github_pat: str = Form(...),
 ):
-    tenant_id         = tenant_id.strip()
-    github_repo       = github_repo.strip()
-    cloudtrail_bucket = cloudtrail_bucket.strip()
-    github_pat        = github_pat.strip()
+    tenant_id   = tenant_id.strip()
+    github_repo = github_repo.strip()
+    github_pat  = github_pat.strip()
 
-    external_id = secrets.token_urlsafe(32)
-    role_arn    = f"arn:aws:iam::{tenant_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
+    external_id       = secrets.token_urlsafe(32)
+    role_arn          = f"arn:aws:iam::{tenant_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
+    cloudtrail_bucket = f"{CLOUDTRAIL_BUCKET_PREFIX}-{tenant_id}"
 
-    # Store PAT in Secrets Manager; get back the ARN to save in DynamoDB
     secret_name = f"{PROJECT}/github-token-{tenant_id}"
     try:
         resp = secretsmanager.create_secret(
@@ -287,9 +359,7 @@ async def register_submit(
                 SecretId=secret_name,
                 SecretString=f'{{"token": "{github_pat}"}}',
             )
-            github_token_secret_arn = secretsmanager.describe_secret(
-                SecretId=secret_name
-            )["ARN"]
+            github_token_secret_arn = secretsmanager.describe_secret(SecretId=secret_name)["ARN"]
         else:
             body = f'<div class="flash err">Secrets Manager error: {e}</div><a href="/register" class="btn btn-secondary">Go back</a>'
             return _page("Error", body)
@@ -297,12 +367,13 @@ async def register_submit(
     try:
         table.put_item(
             Item={
-                "tenant_id":              tenant_id,
-                "role_arn":               role_arn,
-                "external_id":            external_id,
-                "cloudtrail_bucket":      cloudtrail_bucket,
-                "github_repo":            github_repo,
+                "tenant_id":               tenant_id,
+                "role_arn":                role_arn,
+                "external_id":             external_id,
+                "cloudtrail_bucket":       cloudtrail_bucket,
+                "github_repo":             github_repo,
                 "github_token_secret_arn": github_token_secret_arn,
+                "status":                  "active",
             },
             ConditionExpression="attribute_not_exists(tenant_id)",
         )
@@ -314,7 +385,7 @@ async def register_submit(
         body = f'<div class="flash err">{err}</div><a href="/register" class="btn btn-secondary">Go back</a>'
         return _page("Error", body)
 
-    cfn_yaml = _cfn_template(tenant_id, external_id, cloudtrail_bucket)
+    cfn_yaml = _cfn_template(tenant_id, external_id)
 
     body = f"""
       <div class="flash ok">
@@ -322,7 +393,6 @@ async def register_submit(
         Send the setup template below to your customer — they deploy it once and they're live.
       </div>
 
-      <!-- Steps -->
       <div class="card">
         <h2>What the customer needs to do</h2>
         <div class="step">
@@ -330,20 +400,11 @@ async def register_submit(
           <div class="step-body">
             <strong>Deploy the CloudFormation stack below</strong>
             In their AWS console → CloudFormation → Create Stack → paste the template.
-            It creates the cross-account IAM role with the correct trust policy and permissions.
+            It creates the S3 bucket, CloudTrail trail, and cross-account IAM role.
           </div>
         </div>
         <div class="step">
           <div class="step-num">2</div>
-          <div class="step-body">
-            <strong>Make sure CloudTrail is enabled</strong>
-            CloudTrail must be logging Management Write events to
-            <code>{cloudtrail_bucket}</code> in their account.
-            If not already configured, they can enable it in the CloudTrail console.
-          </div>
-        </div>
-        <div class="step">
-          <div class="step-num">3</div>
           <div class="step-body">
             <strong>Done</strong>
             The next daily batch run at 7 AM UTC picks them up automatically.
@@ -351,7 +412,6 @@ async def register_submit(
         </div>
       </div>
 
-      <!-- CFn template -->
       <div class="card">
         <div class="copy-bar">
           <span>cloudformation-setup.yaml</span>
@@ -369,7 +429,7 @@ async def register_submit(
     return _page("Tenant Added", body)
 
 
-# ── Delete tenant ─────────────────────────────────────────────────────────────
+# ── Admin UI: delete tenant ────────────────────────────────────────────────────
 
 @app.post("/tenants/{tenant_id}/delete", response_class=HTMLResponse)
 async def delete_tenant(tenant_id: str):
@@ -378,3 +438,168 @@ async def delete_tenant(tenant_id: str):
         return await index(flash=f"Tenant {tenant_id} removed.", flash_type="ok")
     except ClientError as e:
         return await index(flash=str(e), flash_type="err")
+
+
+# ── Customer Portal API ────────────────────────────────────────────────────────
+
+class InitRequest(BaseModel):
+    tenant_id: str
+
+
+class CompleteRequest(BaseModel):
+    tenant_id: str
+    github_repo: str
+    github_pat: str
+
+
+@app.post("/customer/init")
+async def customer_init(req: InitRequest):
+    """
+    Step 1 of customer self-service onboarding.
+    Generates an ExternalId, saves a pending tenant record, and returns the CFN template.
+    """
+    tenant_id = req.tenant_id.strip()
+    if not tenant_id.isdigit() or len(tenant_id) != 12:
+        raise HTTPException(status_code=400, detail="tenant_id must be a 12-digit AWS account ID")
+
+    external_id       = secrets.token_urlsafe(32)
+    role_arn          = f"arn:aws:iam::{tenant_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
+    cloudtrail_bucket = f"{CLOUDTRAIL_BUCKET_PREFIX}-{tenant_id}"
+    cfn_yaml          = _cfn_template(tenant_id, external_id)
+
+    try:
+        table.put_item(
+            Item={
+                "tenant_id":         tenant_id,
+                "role_arn":          role_arn,
+                "external_id":       external_id,
+                "cloudtrail_bucket": cloudtrail_bucket,
+                "status":            "pending",
+            },
+            ConditionExpression="attribute_not_exists(tenant_id)",
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            # Already exists — fetch current record and return its template
+            existing = table.get_item(Key={"tenant_id": tenant_id}).get("Item", {})
+            existing_ext_id = existing.get("external_id", external_id)
+            return JSONResponse({
+                "external_id":       existing_ext_id,
+                "cfn_yaml":          _cfn_template(tenant_id, existing_ext_id),
+                "cloudtrail_bucket": cloudtrail_bucket,
+                "role_arn":          role_arn,
+                "already_exists":    True,
+                "status":            existing.get("status", "pending"),
+            })
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return JSONResponse({
+        "external_id":       external_id,
+        "cfn_yaml":          cfn_yaml,
+        "cloudtrail_bucket": cloudtrail_bucket,
+        "role_arn":          role_arn,
+        "already_exists":    False,
+        "status":            "pending",
+    })
+
+
+@app.post("/customer/complete")
+async def customer_complete(req: CompleteRequest):
+    """
+    Final step of customer self-service onboarding.
+    Validates the cross-account role is accessible, stores GitHub PAT, and activates the tenant.
+    """
+    tenant_id   = req.tenant_id.strip()
+    github_repo = req.github_repo.strip()
+    github_pat  = req.github_pat.strip()
+
+    existing = table.get_item(Key={"tenant_id": tenant_id}).get("Item")
+    if not existing:
+        raise HTTPException(status_code=404, detail="Tenant not found. Please start from step 1.")
+
+    role_arn    = existing["role_arn"]
+    external_id = existing["external_id"]
+
+    # Verify the cross-account role is actually deployable by attempting to assume it
+    try:
+        sts_client.assume_role(
+            RoleArn=role_arn,
+            RoleSessionName="drift-detector-validation",
+            ExternalId=external_id,
+            DurationSeconds=900,
+        )
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("AccessDenied", "NoSuchEntityException"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Could not assume the cross-account role. "
+                    "Make sure the CloudFormation stack deployed successfully (status: CREATE_COMPLETE) "
+                    "before completing setup."
+                ),
+            )
+        raise HTTPException(status_code=500, detail=f"AWS error during role validation: {e}")
+
+    # Store GitHub PAT in Secrets Manager
+    secret_name = f"{PROJECT}/github-token-{tenant_id}"
+    try:
+        resp = secretsmanager.create_secret(
+            Name=secret_name,
+            SecretString=f'{{"token": "{github_pat}"}}',
+            Description=f"GitHub PAT for drift-detector tenant {tenant_id}",
+        )
+        github_token_secret_arn = resp["ARN"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ResourceExistsException":
+            secretsmanager.put_secret_value(
+                SecretId=secret_name,
+                SecretString=f'{{"token": "{github_pat}"}}',
+            )
+            github_token_secret_arn = secretsmanager.describe_secret(SecretId=secret_name)["ARN"]
+        else:
+            raise HTTPException(status_code=500, detail=f"Secrets Manager error: {e}")
+
+    # Activate the tenant
+    table.update_item(
+        Key={"tenant_id": tenant_id},
+        UpdateExpression="SET #s = :s, github_repo = :gr, github_token_secret_arn = :ga",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":s":  "active",
+            ":gr": github_repo,
+            ":ga": github_token_secret_arn,
+        },
+    )
+
+    return JSONResponse({
+        "success":    True,
+        "tenant_id":  tenant_id,
+        "github_repo": github_repo,
+        "message":    "Setup complete! Your account is now connected to Drift Detector.",
+    })
+
+
+# ── Customer Portal SPA (served after React build) ────────────────────────────
+
+if PORTAL_BUILD.exists():
+    app.mount(
+        "/portal/assets",
+        StaticFiles(directory=str(PORTAL_BUILD / "assets")),
+        name="portal-assets",
+    )
+
+    @app.get("/portal/{full_path:path}", response_class=HTMLResponse)
+    async def serve_portal(full_path: str = ""):
+        index_file = PORTAL_BUILD / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return HTMLResponse("<h1>Portal not built yet. Run: cd ui/customer-portal && npm run build</h1>", status_code=503)
+
+else:
+    @app.get("/portal/{full_path:path}", response_class=HTMLResponse)
+    async def portal_not_built(full_path: str = ""):
+        return HTMLResponse(
+            "<h1>Portal not built.</h1><p>Run: <code>cd ui/customer-portal && npm install && npm run build</code></p>",
+            status_code=503,
+        )
