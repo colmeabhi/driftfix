@@ -1,0 +1,63 @@
+@timestamp,@message,latency_ms
+2026-05-04 16:34:50.028,"[INFO]	2026-05-04T16:34:50.028Z	fd9f921c-1ee8-4de9-b075-13db0d8b3963	Bedrock success tenant_stack invoke attempt=1 latency_ms=1710 manual_review=False confidence=1.0
+",1710
+2026-05-04 16:57:42.852,"[INFO]	2026-05-04T16:57:42.852Z	db33d37d-90c3-493d-975f-e89dfa293bfa	Bedrock success tenant_stack invoke attempt=1 latency_ms=2282 manual_review=False confidence=1.0
+",2282
+2026-05-04 16:57:45.200,"[INFO]	2026-05-04T16:57:45.200Z	c0151305-3891-4e05-855a-be3c725c4729	Bedrock success tenant_stack invoke attempt=1 latency_ms=4607 manual_review=False confidence=1
+",4607
+2026-05-04 16:57:48.158,"[INFO]	2026-05-04T16:57:48.158Z	4e004e9d-7858-47fd-ae56-54036976e70f	Bedrock success tenant_stack invoke attempt=1 latency_ms=7471 manual_review=False confidence=1.0
+",7471
+2026-05-04 17:24:31.998,"[INFO]	2026-05-04T17:24:31.998Z	3144a48c-2679-4c00-a3e4-0239e1484f5f	Bedrock success tenant_stack invoke attempt=1 latency_ms=2971 manual_review=False confidence=1
+",2971
+2026-05-04 17:24:32.623,"[INFO]	2026-05-04T17:24:32.623Z	1bcd0454-6281-4d46-ade8-624f74f2316b	Bedrock success tenant_stack invoke attempt=1 latency_ms=3390 manual_review=False confidence=1
+",3390
+2026-05-04 17:24:33.446,"[INFO]	2026-05-04T17:24:33.446Z	0c9275fd-6d1f-43be-b10a-a183a4767497	Bedrock success tenant_stack invoke attempt=1 latency_ms=4437 manual_review=False confidence=0.95
+",4437
+2026-05-04 17:24:33.506,"[INFO]	2026-05-04T17:24:33.506Z	e0276aed-c16f-49da-ace7-ce014ca13a9b	Bedrock success tenant_stack invoke attempt=1 latency_ms=4664 manual_review=False confidence=0.8
+",4664
+2026-05-04 17:24:34.488,"[INFO]	2026-05-04T17:24:34.488Z	4418e1d2-5aa1-4787-90d4-97a23741283b	Bedrock success tenant_stack invoke attempt=1 latency_ms=5564 manual_review=False confidence=1
+",5564
+2026-05-04 17:24:34.488,"[INFO]	2026-05-04T17:24:34.488Z	dd384591-40ff-4b29-8339-7292c838ee3e	Bedrock success tenant_stack invoke attempt=1 latency_ms=4160 manual_review=False confidence=1
+",4160
+2026-05-04 17:24:34.555,"[INFO]	2026-05-04T17:24:34.555Z	97dda284-fef1-4eb1-8c19-602bec1e79bf	Bedrock success tenant_stack invoke attempt=1 latency_ms=5788 manual_review=False confidence=0.95
+",5788
+2026-05-04 17:24:34.941,"[INFO]	2026-05-04T17:24:34.941Z	bc05363c-c711-440d-a47d-9229e4333d84	Bedrock success tenant_stack invoke attempt=1 latency_ms=5914 manual_review=True confidence=0.8
+",5914
+2026-05-04 17:24:40.571,"[INFO]	2026-05-04T17:24:40.570Z	38186cb5-8794-4656-b789-aeccee25705a	Bedrock success tenant_stack invoke attempt=1 latency_ms=11446 manual_review=False confidence=1.0
+",11446
+2026-05-04 17:24:42.383,"[INFO]	2026-05-04T17:24:42.383Z	9fd2af9c-b770-4d23-a274-fd80269d0ad9	Bedrock success tenant_stack invoke attempt=1 latency_ms=13439 manual_review=False confidence=1
+",13439
+2026-05-04 17:52:40.227,"[INFO]	2026-05-04T17:52:40.227Z	94ca26b7-86bb-481a-8307-5cd529c23cef	Bedrock success tenant_stack invoke attempt=1 latency_ms=2466 manual_review=False confidence=1.0
+",2466
+2026-05-04 17:52:40.439,"[INFO]	2026-05-04T17:52:40.439Z	fa2a43f5-b930-46de-a262-fad54d07051a	Bedrock success tenant_stack invoke attempt=1 latency_ms=2553 manual_review=False confidence=0.95
+",2553
+2026-05-04 17:52:41.731,"[INFO]	2026-05-04T17:52:41.731Z	75a7746e-212a-4264-b66d-957c6d08110a	Bedrock success tenant_stack invoke attempt=1 latency_ms=3878 manual_review=False confidence=1.0
+",3878
+2026-05-04 17:52:42.817,"[INFO]	2026-05-04T17:52:42.817Z	14a8e65c-68f7-41a9-8f45-3d5e9f862a66	Bedrock success tenant_stack invoke attempt=1 latency_ms=4952 manual_review=False confidence=1
+",4952
+2026-05-04 17:52:43.596,"[INFO]	2026-05-04T17:52:43.596Z	4c5e75e0-84e6-473f-9a1c-845080666662	Bedrock success tenant_stack invoke attempt=1 latency_ms=5617 manual_review=False confidence=1
+",5617
+2026-05-04 17:52:43.724,"[INFO]	2026-05-04T17:52:43.724Z	a6c58811-8f38-428e-b089-f8c2a9f7eb8f	Bedrock success tenant_stack invoke attempt=1 latency_ms=5791 manual_review=False confidence=1.0
+",5791
+2026-05-04 17:52:43.755,"[INFO]	2026-05-04T17:52:43.755Z	88841891-4df3-4fde-9f46-bf6263afa384	Bedrock success tenant_stack invoke attempt=1 latency_ms=4271 manual_review=False confidence=1
+",4271
+2026-05-04 17:52:44.990,"[INFO]	2026-05-04T17:52:44.990Z	8a5961b1-98c0-4786-a44e-ebd2c2c8ceab	Bedrock success tenant_stack invoke attempt=1 latency_ms=6980 manual_review=False confidence=1
+",6980
+2026-05-04 17:52:52.331,"[INFO]	2026-05-04T17:52:52.331Z	72c35cd7-93e7-4b34-9826-72c97d06fdfa	Bedrock success tenant_stack invoke attempt=1 latency_ms=14442 manual_review=False confidence=0.95
+",14442
+2026-05-04 17:52:53.049,"[INFO]	2026-05-04T17:52:53.049Z	e163496e-a1a0-4c72-98e7-baa7f778f7b7	Bedrock success tenant_stack invoke attempt=1 latency_ms=14896 manual_review=False confidence=1
+",14896
+2026-05-04 18:05:41.472,"[INFO]	2026-05-04T18:05:41.472Z	3e34e9d2-5d6c-4b0b-9907-14be85efc9b9	Bedrock success tenant_stack invoke attempt=1 latency_ms=2268 manual_review=False confidence=1.0
+",2268
+2026-05-04 18:05:43.305,"[INFO]	2026-05-04T18:05:43.305Z	1559ab44-0744-48c2-a97f-a8493b702a04	Bedrock success tenant_stack invoke attempt=1 latency_ms=3941 manual_review=False confidence=1
+",3941
+2026-05-04 18:05:43.502,"[INFO]	2026-05-04T18:05:43.502Z	b33e62bc-af0a-41ba-906a-acbdfb35adeb	Bedrock success tenant_stack invoke attempt=1 latency_ms=4343 manual_review=False confidence=1.0
+",4343
+2026-05-04 18:05:44.311,"[INFO]	2026-05-04T18:05:44.311Z	32deb424-c98d-4042-9dc5-db8e152fab80	Bedrock success tenant_stack invoke attempt=1 latency_ms=5043 manual_review=False confidence=1
+",5043
+2026-05-04 18:05:46.918,"[INFO]	2026-05-04T18:05:46.918Z	6507f874-c742-42c7-850e-c890800bc4e8	Bedrock success tenant_stack invoke attempt=1 latency_ms=7720 manual_review=False confidence=0.95
+",7720
+2026-05-04 18:05:49.233,"[INFO]	2026-05-04T18:05:49.232Z	e35c0e5f-909e-4a46-9ede-fcb5886b22c6	Bedrock success tenant_stack invoke attempt=1 latency_ms=9788 manual_review=False confidence=1
+",9788
+2026-05-04 18:16:37.970,"[INFO]	2026-05-04T18:16:37.970Z	b8fabfc6-b5c4-4824-b600-7603e0c4850a	Bedrock converse ok model=amazon.nova-lite-v1:0 attempt=1 latency_ms=1778 manual_review=False confidence=0.9
+",1778
