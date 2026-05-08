@@ -10,7 +10,7 @@ When an engineer makes an out-of-band change in the AWS Console — modifying a 
 
 The system spans two AWS accounts and a hosted customer portal.
 
-### SaaS Pipeline (AWS Account: 274024437845)
+### SaaS Pipeline
 
 Deployed via `terraform/saas/`. The pipeline runs on a daily EventBridge schedule:
 
