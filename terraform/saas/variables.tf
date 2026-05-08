@@ -49,3 +49,9 @@ variable "lambda_zip_bucket" {
   description = "S3 bucket where Lambda deployment packages are uploaded by scripts/package_lambdas.sh"
   type        = string
 }
+
+variable "alert_email" {
+  description = "Email address to receive CloudWatch alarm notifications (leave empty to skip SNS subscription)"
+  type        = string
+  default     = ""
+}

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 
 import boto3
@@ -66,15 +67,18 @@ def run_cfn_lint(content):
         f.write(content)
         tmp_path = f.name
     try:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = "/var/task:" + env.get("PYTHONPATH", "")
         result = subprocess.run(
-            ["cfn-lint", tmp_path, "--format", "json"],
+            [sys.executable, "/var/task/bin/cfn-lint", tmp_path, "--format", "json"],
             capture_output=True, text=True,
+            env=env,
         )
         if result.returncode == 0:
             return []
         return json.loads(result.stdout) if result.stdout else [result.stderr]
     except FileNotFoundError:
-        logger.warning("cfn-lint not found in Lambda layer — skipping lint")
+        logger.warning("cfn-lint entry script not found — skipping lint")
         return []
     finally:
         os.unlink(tmp_path)

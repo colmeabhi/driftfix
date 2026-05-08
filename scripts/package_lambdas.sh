@@ -6,7 +6,7 @@ set -euo pipefail
 BUCKET="${1:?Usage: $0 <s3-bucket-name>}"
 LAMBDAS_DIR="$(dirname "$0")/../lambdas"
 
-for fn in processor stack_processor validator pr_creator; do
+for fn in processor stack_processor validator pr_creator health_check; do
     echo "==> Packaging $fn"
     dir="$LAMBDAS_DIR/$fn"
     tmp=$(mktemp -d)
