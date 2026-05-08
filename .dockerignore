@@ -1,0 +1,14 @@
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+.cursor
+node_modules
+ui/customer-portal/node_modules
+ui/customer-portal/dist
+terminals
+results
+tests
+scripts/load_test
+scenario_log.json
