@@ -9,3 +9,4 @@ terraform.tfvars
 !terraform.tfvars.example
 node_modules/
 dist/
+.vite/

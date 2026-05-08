@@ -1,0 +1,86 @@
+[
+  {
+    "id": "T1",
+    "name": "T1-Functional",
+    "type": "functional",
+    "description": "Direct stack-processor invocation with synthetic CloudTrail event for drift-test-01. Verifies LLM call, validator, and PR creation end-to-end.",
+    "objective": "Verify the complete drift detection pipeline for a single stack without CloudTrail ingestion overhead",
+    "expected_outcome": "stack-processor invokes Bedrock (latency_ms logged), validator accepts template, pr-creator opens a GitHub PR",
+    "stacks": 1,
+    "drift_rounds": [
+      0
+    ],
+    "drift_induced_at": "2026-05-04T16:34:43Z",
+    "processor_invoked_at": "2026-05-04T16:34:44Z",
+    "analysis_start": "2026-05-04T16:34:44Z",
+    "analysis_end": "2026-05-04T16:44:44Z"
+  },
+  {
+    "id": "T2",
+    "name": "T2-Scaling",
+    "type": "scaling",
+    "description": "10 stacks drifted (round 1), orchestrator processes all in parallel. Measures Lambda horizontal scale-out and throughput at moderate load.",
+    "objective": "Verify Lambda concurrency scales to handle 10 parallel stacks and measure throughput baseline",
+    "expected_outcome": "10 parallel stack-processor invocations, peak ConcurrentExecutions = 10, no throttles",
+    "stacks": 10,
+    "drift_rounds": [
+      1
+    ],
+    "drift_induced_at": "2026-05-04T16:47:05Z",
+    "processor_invoked_at": "2026-05-04T16:47:06Z",
+    "analysis_start": "2026-05-04T16:47:06Z",
+    "analysis_end": "2026-05-04T16:59:06Z"
+  },
+  {
+    "id": "T3",
+    "name": "T3-Performance",
+    "type": "performance",
+    "description": "10 stacks drifted across all 3 rounds (increasing complexity), then processed together. Highest event density per stack \u2014 primary P95/P99 benchmark scenario.",
+    "objective": "Measure P95/P99 Bedrock latency and peak throughput under maximum drift event density",
+    "expected_outcome": "Bedrock P99 < 120000 ms, throughput >= T2, no Lambda crashes or DLQ messages from valid tenants",
+    "stacks": 10,
+    "drift_rounds": [
+      1,
+      2,
+      3
+    ],
+    "drift_induced_at": "2026-05-04T17:14:10Z",
+    "processor_invoked_at": "2026-05-04T17:14:11Z",
+    "analysis_start": "2026-05-04T17:14:11Z",
+    "analysis_end": "2026-05-04T17:31:11Z"
+  },
+  {
+    "id": "T4",
+    "name": "T4-Failure",
+    "type": "failure",
+    "description": "Bad tenant with non-existent IAM role injected into DynamoDB. Orchestrator logs ERROR for that tenant and continues processing valid tenants. DLQ should remain empty (no Lambda crashes).",
+    "objective": "Verify graceful per-tenant error isolation: one bad tenant must not block or crash processing of valid tenants",
+    "expected_outcome": "ERROR log for 'load-test-bad-tenant', valid tenant stacks processed normally, DLQ depth = 0, Lambda invocation count unchanged",
+    "stacks": 10,
+    "drift_rounds": [
+      1
+    ],
+    "fault": "Invalid role_arn in DynamoDB tenant record causes STS AssumeRole ClientError",
+    "drift_induced_at": "2026-05-04T17:42:47Z",
+    "processor_invoked_at": "2026-05-04T17:42:48Z",
+    "analysis_start": "2026-05-04T17:42:48Z",
+    "analysis_end": "2026-05-04T17:54:48Z"
+  },
+  {
+    "id": "T5",
+    "name": "T5-Security",
+    "type": "security",
+    "description": "CloudWatch log audit for credential leakage. Searches for AWS access key patterns (AKIA), GitHub tokens (ghp_), and password keywords. Also verifies cross-account role assumption is logged correctly.",
+    "objective": "Confirm no secrets are logged to CloudWatch; verify IAM cross-account flow is auditable",
+    "expected_outcome": "Zero occurrences of AKIA / ghp_ / password in logs; role ARN visible in processor logs",
+    "stacks": 10,
+    "drift_rounds": [
+      1
+    ],
+    "security_scan_result": "  [STEP] Scanning CloudWatch logs for credential leakage...  [INFO]   Pattern 'AKIA': NOT FOUND in logs (expected)  [INFO]   Pattern 'ghp_': NOT FOUND in logs (expected)  [INFO]   Pattern 'password': NOT FOUND in logs (expected)  [INFO]   Pattern 'secret_key': NOT FOUND in logs (expected)  [INFO]   Pattern 'aws_secret': NOT FOUND in logs (expected)  [WARN]   Cross-account role assumption not found in processor logs \u2014 check tenant config  [INFO] Security scan PASSED \u2014 no credential patterns found in logspassed",
+    "drift_induced_at": "2026-05-04T17:55:49Z",
+    "processor_invoked_at": "2026-05-04T17:56:14Z",
+    "analysis_start": "2026-05-04T17:56:14Z",
+    "analysis_end": "2026-05-04T18:04:25Z"
+  }
+]

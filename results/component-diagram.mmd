@@ -1,0 +1,96 @@
+flowchart LR
+
+  %% ── Customer AWS Account ──────────────────────────────────────────────────
+  subgraph customer_acct ["Customer AWS Account"]
+    direction LR
+    CT["CloudTrail Trail"]
+    CTB[("S3 CloudTrail Bucket")]
+    XR["Cross-Account IAM Role"]
+    CFNResources["CloudFormation Stacks"]
+    CT -->|"delivers .json.gz logs"| CTB
+  end
+
+  %% ── Customer Self-Service Onboarding ─────────────────────────────────────
+  subgraph onboarding ["Onboarding (CFN template)"]
+    CFN_TEMPLATE["Generated CFN Template"]
+  end
+  CFN_TEMPLATE -->|"deploys into"| customer_acct
+
+  %% ── SaaS AWS Account — Data Stores ───────────────────────────────────────
+  subgraph saas_stores ["SaaS AWS — Data Stores"]
+    direction TB
+    T[("DynamoDB tenants")]
+    R[("DynamoDB reconciliations")]
+    AB[("S3 audit bucket")]
+  end
+
+  %% ── SaaS AWS Account — Trigger & Failure Handling ────────────────────────
+  subgraph saas_infra ["SaaS AWS — Scheduling & Failure"]
+    direction LR
+    EB["EventBridge schedule"]
+    DLQ["SQS DLQ"]
+    CWA["CloudWatch alarm"]
+    DLQ -->|"metric trigger"| CWA
+  end
+
+  %% ── SaaS AWS Account — Lambda Pipeline ───────────────────────────────────
+  subgraph lambda_pipeline ["SaaS AWS — Lambda Pipeline"]
+    direction LR
+    P["processor"]
+    SP["stack_processor"]
+    V["validator"]
+    PR["pr_creator"]
+    P --> SP --> V --> PR
+  end
+
+  %% ── Control Plane ─────────────────────────────────────────────────────────
+  subgraph control_plane ["Control Plane"]
+    direction TB
+    Admin["FastAPI admin_ui"]
+    Portal["React customer-portal"]
+    Portal -->|"POST /customer/init\nPOST /customer/complete"| Admin
+  end
+
+  %% ── External Services ─────────────────────────────────────────────────────
+  subgraph external ["External Services"]
+    direction TB
+    STS["AWS STS"]
+    SM["Secrets Manager"]
+    BR["AWS Bedrock"]
+    GH["GitHub API"]
+  end
+
+  %% ── Relationships: Scheduling & Orchestration ─────────────────────────────
+  EB -->|"invoke"| P
+  P -->|"Scan tenants"| T
+  P -->|"BatchGet / BatchWrite"| R
+  P -->|"AssumeRole + ExternalId"| STS
+  STS -.->|"temp credentials"| XR
+  P -->|"List + GetObject logs"| CTB
+  P -->|"async invoke"| SP
+  P -. "async invoke failure" .-> DLQ
+
+  %% ── Relationships: Stack Processor ───────────────────────────────────────
+  SP -->|"AssumeRole + ExternalId"| STS
+  SP -->|"GetTemplate fallback"| CFNResources
+  SP -->|"GetSecretValue"| SM
+  SP -->|"Read templates"| GH
+  SP -->|"Converse API"| BR
+  SP -->|"async invoke"| V
+  SP -. "async invoke failure" .-> DLQ
+
+  %% ── Relationships: Validator ──────────────────────────────────────────────
+  V -->|"PutObject validated/*"| AB
+  V -->|"async invoke"| PR
+
+  %% ── Relationships: PR Creator ─────────────────────────────────────────────
+  PR -->|"GetObject"| AB
+  PR -->|"GetSecretValue"| SM
+  PR -->|"create commit + open PR"| GH
+  PR -->|"UpdateItem (status, pr_url)"| R
+
+  %% ── Relationships: Control Plane ──────────────────────────────────────────
+  Admin -->|"Scan / Put / Update / Delete"| T
+  Admin -->|"CreateSecret / PutSecretValue"| SM
+  Admin -->|"AssumeRole validate"| STS
+  Admin -->|"generates"| CFN_TEMPLATE
