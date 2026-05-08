@@ -1,25 +1,85 @@
 # Customer Onboarding Guide
 
-This guide walks you through connecting your AWS account to the Drift Detector SaaS. The setup takes about 15 minutes and requires Terraform and AWS CLI access to your account.
+This guide walks you through connecting your AWS account to the Drift Detector SaaS.
+
+There are two ways to onboard — choose the one that fits your situation:
+
+| Method | Best for | Time |
+|--------|----------|------|
+| **[Self-Service Portal](#method-1-self-service-portal-recommended)** | Most customers — no Terraform or CLI required | ~5 minutes |
+| **[Manual (Terraform)](#method-2-manual-terraform)** | Advanced users who already manage infra with Terraform | ~15 minutes |
 
 ---
 
-## What You Need Before Starting
+## Method 1 — Self-Service Portal (Recommended)
+
+No Terraform, no CLI, no values to copy-paste. The portal guides you through everything in three steps.
+
+### Step 1 — Open the portal
+
+Go to:
+
+**https://fxcbu33sqc.us-east-1.awsapprunner.com/portal/**
+
+Click **"Connect your AWS account"**.
+
+### Step 2 — Enter your AWS Account ID
+
+Enter your 12-digit AWS account ID. You can find this in the top-right corner of the AWS console, or by running:
+
+```bash
+aws sts get-caller-identity --query Account --output text
+```
+
+The portal will generate a CloudFormation template specific to your account. Click **"Generate CloudFormation template"**.
+
+### Step 3 — Deploy the CloudFormation template
+
+Download the generated YAML file and deploy it in your AWS account:
+
+1. Open [AWS CloudFormation → Create Stack](https://console.aws.amazon.com/cloudformation/home#/stacks/create/template)
+2. Choose **"Upload a template file"** and upload the downloaded YAML
+3. Name the stack (e.g. `drift-detector-setup`)
+4. On the final review page, check the **IAM capabilities** acknowledgment box
+5. Click **"Create stack"** and wait for status **CREATE_COMPLETE** (takes ~1–2 minutes)
+
+The template creates three resources in your account:
+- **S3 bucket** — stores your CloudTrail logs (expires after 90 days)
+- **CloudTrail trail** — records management write events across all regions
+- **Cross-account IAM role** — read-only access so Drift Detector can scan your logs
+
+### Step 4 — Connect GitHub
+
+Return to the portal. Enter:
+- **GitHub repository** — the repo where your CloudFormation templates live (format: `owner/repo`)
+- **GitHub Personal Access Token** — a fine-grained PAT with **Contents** and **Pull requests** read/write access
+
+[Create a PAT on GitHub →](https://github.com/settings/tokens?type=beta)
+
+Click **"Complete Setup"**. The portal will verify the cross-account role is accessible and activate your account.
+
+### Step 5 — Done
+
+Your account is now connected. Drift Detector runs daily at **7 AM UTC**. When drift is detected, a pull request is automatically opened in your GitHub repository with the reconciliation fix.
+
+---
+
+## Method 2 — Manual (Terraform)
+
+Use this method if you prefer to manage the onboarding resources as Terraform code alongside your existing infra.
+
+### Prerequisites
 
 - AWS CLI configured with credentials for your account
 - Terraform >= 1.5 installed
-- Your GitHub repository URL where your CloudFormation templates live (e.g. `your-org/infra-repo`)
+- GitHub repository URL where your CloudFormation templates live (e.g. `your-org/infra-repo`)
 - The following values provided by your SaaS contact:
   - `saas_account_id` — the SaaS AWS account ID
   - `external_id` — a shared secret string agreed upon during onboarding
 
----
-
-## Section 1 — Setup Instructions
-
 ### Step 1 — Create a Terraform IAM user
 
-In your AWS account, create an IAM user for Terraform with the following inline policy. This is used only to run the onboarding Terraform — you can delete it afterward if you prefer.
+In your AWS account, create an IAM user for Terraform with the following inline policy. This is used only to run the onboarding Terraform — you can delete it afterward.
 
 ```json
 {
@@ -79,7 +139,7 @@ Review the plan and type `yes` to confirm. The apply takes about 2 minutes.
 
 ### Step 4 — Send the outputs back
 
-After apply completes, Terraform prints three output values. Send all three to your SaaS contact — they are needed to complete your onboarding:
+After apply completes, Terraform prints three output values. Send all three to your SaaS contact:
 
 ```bash
 terraform output
@@ -91,68 +151,67 @@ terraform output
 | `external_id` | Confirms the shared secret (should match what was agreed) |
 | `cloudtrail_bucket_name` | The S3 bucket where your CloudTrail logs are stored |
 
-Also provide your **GitHub repository** (e.g. `your-org/infra-repo`) where your CloudFormation templates live.
+Also provide your **GitHub repository** (e.g. `your-org/infra-repo`) and a **GitHub PAT** with Contents + Pull requests access.
 
-That's it — your SaaS contact will complete the registration and confirm when your account is active.
+Your SaaS contact will complete the registration and confirm when your account is active.
 
 ---
 
-## Section 2 — What We Deploy in Your Account
+## What Gets Deployed in Your Account
 
-We follow a minimal-footprint principle: we create exactly three resources in your account, all scoped tightly to what is needed. We do not install agents, modify existing resources, or retain persistent access beyond what is described here.
+Both methods create the same three resources. We follow a minimal-footprint principle — we do not install agents, modify existing resources, or retain persistent access beyond what is described here.
 
 ### 1. CloudTrail Trail
 
-We enable a CloudTrail trail that logs all AWS API calls across all regions. If you already have CloudTrail enabled, you can skip this resource — speak to your SaaS contact to configure the existing trail instead.
+A multi-region trail named `drift-detector-trail` that logs all AWS management write events.
 
-**Why:** CloudTrail is the source of truth for what changed in your account. When an engineer makes a manual change in the AWS console (e.g. modifying an S3 bucket's encryption settings), CloudTrail records the API call. This is how drift is detected.
+**Why:** CloudTrail is the source of truth for what changed in your account. When an engineer makes a manual change (e.g. modifying an S3 bucket's encryption settings), CloudTrail records the API call. This is how drift is detected.
 
-**What it creates:**
-- A multi-region trail named `drift-detector-trail`
-- An S3 bucket named `drift-detector-cloudtrail-<your-account-id>` to store the log files
-- A bucket policy allowing only the CloudTrail service to write to it
+If you already have CloudTrail enabled, contact your SaaS contact to configure the existing trail instead.
 
 ### 2. S3 Bucket for CloudTrail Logs
 
-Log files are stored in your account, in a bucket we create. The SaaS platform reads these logs once daily using the cross-account role described below — it does not have any write access to this bucket.
+Named `drift-detector-cloudtrail-<your-account-id>`. Log files are stored in your account — the SaaS platform reads them once daily using the cross-account role. It has no write access.
 
-**Retention:** Log files are retained indefinitely by default. You can add a lifecycle rule to expire them after your desired retention period.
+Log files expire after 90 days by default (configurable).
 
 ### 3. Cross-Account IAM Role
 
-This is the trust boundary between your account and the SaaS platform. The role grants the SaaS account permission to assume it, using your `external_id` as a guard against confused deputy attacks — meaning only the SaaS platform that knows your `external_id` can assume the role.
-
-**What the role can do:**
+Named `drift-detector-cross-account`. Grants the SaaS platform read-only access using your `external_id` as a confused-deputy guard — only our platform that knows your `external_id` can assume the role.
 
 | Permission | Resource | Purpose |
 |------------|----------|---------|
-| `cloudformation:GetTemplate` | All stacks | Fetch the current CloudFormation template for a stack where drift was detected |
-| `cloudformation:DescribeStacks` | All stacks | Read stack metadata |
-| `cloudformation:ListStacks` | All stacks | Enumerate stacks |
-| `s3:GetObject`, `s3:ListBucket`, `s3:ListObjectsV2` | CloudTrail S3 bucket only | Read the daily log files |
-| `ec2:DescribeTags`, `s3:GetBucketTagging`, `rds:ListTagsForResource`, etc. | All resources (read-only) | Look up the `aws:cloudformation:stack-name` tag on a changed resource to identify which stack it belongs to |
+| `cloudformation:GetTemplate`, `DescribeStacks`, `ListStacks` | All stacks | Fetch templates for stacks where drift was detected |
+| `s3:GetObject`, `s3:ListBucket` | CloudTrail bucket only | Read daily log files |
+| `ec2:DescribeTags`, `s3:GetBucketTagging`, `rds:ListTagsForResource`, etc. | All resources (read-only) | Identify which CloudFormation stack a changed resource belongs to |
 
-**What the role cannot do:** write to any resource, create or delete anything, access any data outside of CloudFormation templates and CloudTrail logs, or assume any other role in your account.
-
-The `external_id` is a randomly generated string agreed upon during onboarding. Without it, the SaaS platform cannot assume the role even if it knows the role ARN.
+**What the role cannot do:** write to any resource, create or delete anything, access data outside CloudFormation templates and CloudTrail logs, or assume any other role in your account.
 
 ---
 
-## Section 3 — Data Privacy
+## Data Privacy
 
-- **CloudTrail log files** contain a record of API calls made in your account including the caller identity, timestamp, and request parameters. They do not contain the payload of data operations (e.g. the contents of S3 objects).
-- **CloudFormation templates** are read once per affected stack per daily batch run. They are stored in the SaaS audit bucket for 90 days for audit and retry purposes.
+- **CloudTrail log files** contain a record of API calls (caller identity, timestamp, request parameters). They do not contain the payload of data operations (e.g. the contents of S3 objects).
+- **CloudFormation templates** are read once per affected stack per daily batch run and stored in the SaaS audit bucket for 90 days for audit and retry purposes.
 - No data is shared with third parties. The SaaS platform runs entirely within AWS infrastructure.
 
 ---
 
-## Section 4 — Offboarding
+## Offboarding
 
-To remove the integration, run:
+### Self-service portal customers
+
+Contact support to remove your tenant record. Then delete the CloudFormation stack from your AWS console:
+
+1. Go to **AWS CloudFormation → Stacks**
+2. Select `drift-detector-setup`
+3. Click **Delete**
+
+### Terraform customers
 
 ```bash
 cd terraform/customer
 terraform destroy
 ```
 
-This deletes the CloudTrail trail, S3 bucket, and IAM role. The SaaS platform will no longer be able to access your account. Contact your SaaS contact to remove your tenant record from the platform.
+This deletes the CloudTrail trail, S3 bucket, and IAM role. Contact your SaaS contact to remove your tenant record from the platform.
