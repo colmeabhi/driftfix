@@ -18,6 +18,7 @@ for fn in processor stack_processor validator pr_creator health_check; do
         --only-binary :all: \
         --upgrade
     cp "$dir"/*.py "$tmp/"
+    cp "$LAMBDAS_DIR"/shared/*.py "$tmp/"
 
     zip_path="/tmp/${fn}.zip"
     (cd "$tmp" && zip -r "$zip_path" . -q)
