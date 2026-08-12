@@ -22,11 +22,6 @@ def resolve_stack_name(creds, cloudtrail_event):
     params = cloudtrail_event.get("requestParameters") or {}
     region = cloudtrail_event.get("awsRegion", "us-east-1")
 
-    # CloudFormation API calls carry stackName directly — fast path.
-    stack_name = params.get("stackName")
-    if stack_name:
-        return stack_name
-
     handler = _HANDLERS.get(event_source)
     if not handler:
         raise ValueError(f"Unsupported event source for tag resolution: {event_source}")

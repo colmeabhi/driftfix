@@ -5,7 +5,7 @@ Triggered by EventBridge schedule (daily at 7 AM UTC).
 For each tenant:
   1. Assumes cross-account role via STS
   2. Lists CloudTrail log files from last 24h from the customer's S3 bucket
-  3. Parses + filters write events
+  3. Parses + filters write events (skipping failed calls and CloudFormation's own deploys)
   4. Deduplicates against reconciliations table (prevents reprocessing on retry)
   5. Groups new events by stack via tag-based resolver
   6. Invokes one Stack Processor Lambda per stack (async — runs in parallel)
@@ -34,6 +34,8 @@ RECONCILIATIONS_TABLE = os.environ["DYNAMODB_RECONCILIATIONS_TABLE"]
 STACK_PROCESSOR_FUNCTION_NAME = os.environ["STACK_PROCESSOR_FUNCTION_NAME"]
 
 WRITE_PREFIXES = ("Create", "Update", "Delete", "Put", "Modify", "Attach", "Detach", "Associate", "Disassociate")
+
+CLOUDFORMATION = "cloudformation.amazonaws.com"
 
 
 def lambda_handler(event, context):
@@ -118,9 +120,31 @@ def parse_log_file(creds, bucket, key):
 
 
 def is_write_event(event):
+    """True for a successful out-of-band write — the only kind that causes drift."""
     if event.get("readOnly", False):
         return False
+    if event.get("errorCode"):
+        return False                    # the call failed, so nothing changed
+    if is_cloudformation_originated(event):
+        return False
     return event.get("eventName", "").startswith(WRITE_PREFIXES)
+
+
+def is_cloudformation_originated(event):
+    """
+    True when the change came from a CloudFormation deployment rather than a
+    manual edit. That covers calls to CloudFormation itself (UpdateStack,
+    ExecuteChangeSet, ...) and the calls CloudFormation makes to other services
+    on the user's behalf while deploying, which CloudTrail stamps with
+    invokedBy / sourceIPAddress = cloudformation.amazonaws.com.
+    """
+    if event.get("eventSource") == CLOUDFORMATION:
+        return True
+    identity = event.get("userIdentity") or {}
+    return (
+        identity.get("invokedBy") == CLOUDFORMATION
+        or event.get("sourceIPAddress") == CLOUDFORMATION
+    )
 
 
 def filter_already_processed(tenant_id, events):
