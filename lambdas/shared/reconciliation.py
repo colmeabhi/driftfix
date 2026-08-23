@@ -59,6 +59,14 @@ def should_process(record, now=None):
     return False, attempts              # finished, or an unknown status
 
 
+def gave_up(record, now=None):
+    """True when an event failed or got stuck and has no attempts left."""
+    if record is None or int(record.get("attempts", 1)) < MAX_ATTEMPTS:
+        return False
+    status = record.get("status")
+    return status == STATUS_FAILED or (status == STATUS_QUEUED and _is_stale(record, now))
+
+
 def _is_stale(record, now=None):
     now = now or datetime.now(timezone.utc)
     try:

@@ -68,3 +68,13 @@ def test_mark_events_updates_every_event(table):
 def test_mark_events_trims_long_text(table):
     rec.mark_events(table, "t1", ["e1"], rec.STATUS_FAILED, error="x" * 10_000)
     assert len(table.attrs("e1")["error"]) == 2000
+
+
+def test_gave_up_only_when_attempts_are_exhausted():
+    exhausted = {"status": rec.STATUS_FAILED, "attempts": rec.MAX_ATTEMPTS}
+    assert rec.gave_up(exhausted, NOW) is True
+    assert rec.gave_up(_queued(minutes_ago=10_000, attempts=rec.MAX_ATTEMPTS), NOW) is True
+    assert rec.gave_up({"status": rec.STATUS_FAILED, "attempts": 1}, NOW) is False
+    assert rec.gave_up({"status": rec.STATUS_PR_OPENED, "attempts": rec.MAX_ATTEMPTS}, NOW) is False
+    assert rec.gave_up(_queued(minutes_ago=5, attempts=rec.MAX_ATTEMPTS), NOW) is False
+    assert rec.gave_up(None, NOW) is False
