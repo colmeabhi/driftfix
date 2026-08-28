@@ -4,9 +4,10 @@ Orchestrator Lambda — Batch Mode
 Triggered by EventBridge schedule (daily at 7 AM UTC).
 For each tenant:
   1. Assumes cross-account role via STS
-  2. Lists CloudTrail log files from last 24h from the customer's S3 bucket
+  2. Lists CloudTrail log files from the lookback window (72h) in the customer's S3 bucket
   3. Parses + filters write events (skipping failed calls and CloudFormation's own deploys)
-  4. Deduplicates against reconciliations table (prevents reprocessing on retry)
+  4. Deduplicates against reconciliations table: finished and in-flight events
+     are skipped, failed or stuck ones are retried up to MAX_ATTEMPTS
   5. Groups new events by stack via tag-based resolver
   6. Invokes one Stack Processor Lambda per stack (async — runs in parallel)
 """
@@ -20,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 from botocore.exceptions import ClientError
 
+from reconciliation import STATUS_QUEUED, expires_at, gave_up, should_process
 from stack_resolver import resolve_stack_name
 
 logger = logging.getLogger()
@@ -36,6 +38,10 @@ STACK_PROCESSOR_FUNCTION_NAME = os.environ["STACK_PROCESSOR_FUNCTION_NAME"]
 WRITE_PREFIXES = ("Create", "Update", "Delete", "Put", "Modify", "Attach", "Detach", "Associate", "Disassociate")
 
 CLOUDFORMATION = "cloudformation.amazonaws.com"
+
+# Three times the daily schedule: an event whose processing failed is still in
+# the window for the next two runs. Dedup makes the overlap between runs safe.
+LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "72"))
 
 
 def lambda_handler(event, context):
@@ -67,7 +73,7 @@ def process_tenant(tenant):
     creds = assume_cross_account_role(tenant["role_arn"], tenant["external_id"], tenant_id)
 
     log_keys = list_cloudtrail_logs(creds, tenant["cloudtrail_bucket"])
-    logger.info("Tenant %s — %d log file(s) in last 24h", tenant_id, len(log_keys))
+    logger.info("Tenant %s — %d log file(s) in last %dh", tenant_id, len(log_keys), LOOKBACK_HOURS)
 
     all_write_events = []
     for key in log_keys:
@@ -77,8 +83,9 @@ def process_tenant(tenant):
         except Exception as e:
             logger.error("Tenant %s — failed parsing %s: %s", tenant_id, key, e)
 
-    new_events = filter_already_processed(tenant_id, all_write_events)
-    logger.info("Tenant %s — %d new write event(s) after dedup", tenant_id, len(new_events))
+    new_events, attempts = filter_already_processed(tenant_id, all_write_events)
+    logger.info("Tenant %s — %d write event(s) to process after dedup (%d retried)",
+                tenant_id, len(new_events), sum(1 for n in attempts.values() if n))
     if not new_events:
         return
 
@@ -86,7 +93,7 @@ def process_tenant(tenant):
     logger.info("Tenant %s — %d unique stack(s) affected", tenant_id, len(stack_events))
 
     for stack_name, events in stack_events.items():
-        mark_events_queued(tenant_id, events)
+        mark_events_queued(tenant_id, events, attempts)
         invoke_stack_processor(tenant, stack_name, events)
 
 
@@ -102,7 +109,7 @@ def assume_cross_account_role(role_arn, external_id, session_name):
 
 def list_cloudtrail_logs(creds, bucket):
     s3 = _s3_client(creds)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=int(os.environ.get("LOOKBACK_HOURS", "24")))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     keys = []
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix="AWSLogs/"):
@@ -148,36 +155,55 @@ def is_cloudformation_originated(event):
 
 
 def filter_already_processed(tenant_id, events):
-    if not events:
-        return []
-
-    # Drop any records missing a string eventID — malformed CloudTrail entries
-    valid = [e for e in events if isinstance(e.get("eventID"), str)]
+    """
+    Return (events_to_process, attempts) where attempts maps eventID to the
+    number of times that event has already been tried. An event is processed
+    if it is new, or if an earlier attempt failed or got stuck and it still
+    has attempts left — see reconciliation.should_process.
+    """
+    # Drop any records missing a string eventID — malformed CloudTrail entries.
+    # The lookback window overlaps between runs, so also collapse duplicates.
+    valid = list({e["eventID"]: e for e in events if isinstance(e.get("eventID"), str)}.values())
     if not valid:
-        return []
+        return [], {}
 
-    existing_ids = set()
-
+    records = {}
     for i in range(0, len(valid), 100):
         chunk = valid[i:i + 100]
         try:
-            resp = dynamodb.batch_get_item(
-                RequestItems={
-                    RECONCILIATIONS_TABLE: {
-                        "Keys": [
-                            {"tenant_id": tenant_id, "event_id": e["eventID"]}
-                            for e in chunk
-                        ],
-                        "ProjectionExpression": "event_id",
-                    }
-                }
-            )
-            for item in resp["Responses"].get(RECONCILIATIONS_TABLE, []):
-                existing_ids.add(item["event_id"])
+            records.update(_get_records(tenant_id, [e["eventID"] for e in chunk]))
         except Exception as ex:
             logger.warning("BatchGetItem chunk %d failed, treating as unprocessed: %s", i // 100, ex)
 
-    return [e for e in valid if e["eventID"] not in existing_ids]
+    to_process, attempts = [], {}
+    for event in valid:
+        event_id = event["eventID"]
+        process, tried = should_process(records.get(event_id))
+        if process:
+            to_process.append(event)
+            attempts[event_id] = tried
+        elif gave_up(records.get(event_id)):
+            logger.error("Tenant %s — event %s gave up after %d attempt(s)",
+                         tenant_id, event_id, tried)
+    return to_process, attempts
+
+
+def _get_records(tenant_id, event_ids):
+    """BatchGetItem for up to 100 events, following UnprocessedKeys."""
+    request = {
+        RECONCILIATIONS_TABLE: {
+            "Keys": [{"tenant_id": tenant_id, "event_id": eid} for eid in event_ids],
+            "ProjectionExpression": "event_id, #s, #q, #a",
+            "ExpressionAttributeNames": {"#s": "status", "#q": "queued_at", "#a": "attempts"},
+        }
+    }
+    records = {}
+    while request:
+        resp = dynamodb.batch_get_item(RequestItems=request)
+        for item in resp["Responses"].get(RECONCILIATIONS_TABLE, []):
+            records[item["event_id"]] = item
+        request = resp.get("UnprocessedKeys")
+    return records
 
 
 def group_events_by_stack(creds, events):
@@ -191,20 +217,23 @@ def group_events_by_stack(creds, events):
     return stacks
 
 
-def mark_events_queued(tenant_id, events):
+def mark_events_queued(tenant_id, events, attempts):
+    """
+    Record that these events are in flight. The record stays "queued" until a
+    downstream Lambda reports pr_opened, no_change or failed; if none does, it
+    goes stale and the next batch run retries it.
+    """
     table = dynamodb.Table(RECONCILIATIONS_TABLE)
     now = datetime.now(timezone.utc)
-    # TTL: 48h from now — if stack processor never completes, the record expires
-    # and the event will be picked up again on the next batch run.
-    expire_at = int((now + timedelta(hours=48)).timestamp())
     with table.batch_writer() as batch:
         for event in events:
             batch.put_item(Item={
                 "tenant_id": tenant_id,
                 "event_id": event["eventID"],
-                "status": "queued",
+                "status": STATUS_QUEUED,
                 "queued_at": now.isoformat(),
-                "expires_at": expire_at,
+                "attempts": attempts.get(event["eventID"], 0) + 1,
+                "expires_at": expires_at(now),
             })
 
 
