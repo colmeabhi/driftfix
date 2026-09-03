@@ -12,7 +12,7 @@ parameter files (parameters.json, params.yaml, prod.json, etc.) and they are
 passed to the LLM alongside the template. The LLM returns only the files it
 changed; unchanged files are not sent downstream.
 
-# INTERIM: Using Google Gemini. TODO: Replace with AWS Bedrock.
+The model is Amazon Bedrock (converse API), chosen by BEDROCK_MODEL_ID.
 """
 
 import base64
@@ -70,7 +70,7 @@ def lambda_handler(event, context):
     files, primary_path = fetch_files(creds, stack_name, region, github_token, github_repo)
 
     # updated_files = only the files the LLM changed (subset of files keys)
-    updated_files = invoke_bedrock(files, cloudtrail_events)
+    updated_files, _remediation = invoke_bedrock(files, cloudtrail_events)
 
     invoke_validator(tenant, stack_name, cloudtrail_events[0],
                      files, updated_files, primary_path)
@@ -364,49 +364,80 @@ def _norm(s):
     return re.sub(r"[-_\s]", "", s).lower()
 
 
+_INSTRUCTIONS = (
+    "You are an Infrastructure as Code assistant.\n"
+    "Given:\n"
+    "1) FILES: the CloudFormation template of one stack plus any parameter files "
+    "stored next to it, keyed by repository path\n"
+    "2) EVIDENCE: CloudTrail write events for this stack\n\n"
+    "Task: update FILES so they describe the infrastructure as changed in EVIDENCE.\n"
+    "Rules:\n"
+    "- Only modify resources/properties directly supported by EVIDENCE.\n"
+    "- Do not invent resources, properties, values, or files.\n"
+    "- If the changed value reaches the template through a parameter, change it in the "
+    "parameter file that sets it and leave the template alone.\n"
+    "- Leave everything else, including comments and formatting, exactly as it is.\n"
+    "- If evidence is insufficient, return updated_files as {} and set "
+    "manual_review_required=true.\n"
+    "- Output ONLY valid JSON with exactly these keys:\n"
+    "  updated_files (object mapping path to the complete new content of that file; "
+    "include only files you changed; every path must be a key of FILES), "
+    "remediation (object)\n"
+    "- remediation must include: summary, root_cause, confidence (0..1), proposed_changes (list), "
+    "evidence_ids (list), manual_review_required (bool), warnings (list).\n"
+)
+
+
+def build_prompt(files, cloudtrail_events):
+    user_input = {
+        "files": files,
+        "evidence": {
+            "region": cloudtrail_events[0].get("awsRegion", "unknown") if cloudtrail_events else "unknown",
+            "event_count": len(cloudtrail_events),
+            "events": cloudtrail_events[:50],
+            "note": "Only use the evidence provided; do not invent changes.",
+        },
+    }
+    return _INSTRUCTIONS + "\nINPUT:\n" + json.dumps(user_input, default=str)
+
+
+def parse_model_response(model_text, files):
+    """
+    Turn the model's reply into ({path: new_content}, remediation).
+    Raises ValueError if the reply is not the JSON object the prompt asked for.
+    Paths the model made up (not present in files) are dropped.
+    """
+    result = json.loads(_extract_json(model_text))
+    if not isinstance(result, dict):
+        raise ValueError("model reply is not a JSON object")
+
+    updated = result.get("updated_files")
+    if not isinstance(updated, dict):
+        raise ValueError("model reply has no updated_files object")
+
+    updated_files = {}
+    for path, content in updated.items():
+        if path not in files:
+            logger.warning("Model returned a file that was not in the input, ignoring: %s", path)
+        elif isinstance(content, str) and content.strip():
+            updated_files[path] = content
+
+    remediation = result.get("remediation")
+    return updated_files, remediation if isinstance(remediation, dict) else {}
+
+
 def invoke_bedrock(files, cloudtrail_events):
     """
-    Calls Bedrock converse with the original invoke_bedrock prompt (JSON output schema).
-    Inputs:  files = {path: content}, cloudtrail_events = list of CloudTrail records.
-    Returns: {path: updated_content} — same shape expected by invoke_validator.
+    Ask the model to bring the stack's files in line with the CloudTrail evidence.
+    Inputs:  files = {path: content} (template + parameter files),
+             cloudtrail_events = list of CloudTrail records.
+    Returns: ({path: updated_content} for the files the model changed, remediation).
     Model is read from BEDROCK_MODEL_ID env var.
     """
     if not BEDROCK_MODEL_ID:
         raise RuntimeError("BEDROCK_MODEL_ID env var is not set")
 
-    # Use the primary (first) file as the template string for the prompt
-    primary_path = next(iter(files))
-    cfn_template = files[primary_path]
-
-    evidence = {
-        "region": cloudtrail_events[0].get("awsRegion", "unknown") if cloudtrail_events else "unknown",
-        "event_count": len(cloudtrail_events),
-        "events": cloudtrail_events[:50],
-        "note": "Only use the evidence provided; do not invent changes.",
-    }
-
-    instructions = (
-        "You are an Infrastructure as Code assistant.\n"
-        "Given:\n"
-        "1) ORIGINAL CloudFormation template\n"
-        "2) EVIDENCE: CloudTrail write events for this stack\n\n"
-        "Task: Produce an UPDATED CloudFormation template that matches the changes in EVIDENCE.\n"
-        "Rules:\n"
-        "- Only modify resources/properties directly supported by EVIDENCE.\n"
-        "- Do not invent resources, properties, or values.\n"
-        "- If evidence is insufficient, return the ORIGINAL template unchanged and set manual_review_required=true.\n"
-        "- Output ONLY valid JSON with exactly these keys:\n"
-        "  updated_template (string), remediation (object)\n"
-        "- remediation must include: summary, root_cause, confidence (0..1), proposed_changes (list), "
-        "evidence_ids (list), manual_review_required (bool), warnings (list).\n"
-    )
-
-    user_input = {
-        "original_template": cfn_template,
-        "evidence": evidence,
-    }
-
-    prompt = instructions + "\nINPUT:\n" + json.dumps(user_input)
+    prompt = build_prompt(files, cloudtrail_events)
 
     max_attempts = 4
     base_sleep = 0.6
@@ -430,34 +461,24 @@ def invoke_bedrock(files, cloudtrail_events):
             ).strip()
 
             if not model_text:
-                raise RuntimeError("Bedrock converse returned empty assistant text")
+                raise ValueError("Bedrock converse returned empty assistant text")
 
-            # Strip markdown fences the model may add
-            if model_text.startswith("```json"):
-                model_text = model_text[len("```json"):].strip()
-            if model_text.startswith("```"):
-                model_text = model_text[len("```"):].strip()
-            if model_text.endswith("```"):
-                model_text = model_text[:-3].strip()
-
-            result = json.loads(model_text)
-
-            updated_template = result.get("updated_template")
-            if not isinstance(updated_template, str) or not updated_template.strip():
-                raise RuntimeError("Bedrock did not return a non-empty updated_template string")
+            updated_files, remediation = parse_model_response(model_text, files)
 
             elapsed_ms = int((time.perf_counter() - start) * 1000)
-            remediation = result.get("remediation", {})
             logger.info(
                 "Bedrock converse ok model=%s attempt=%d latency_ms=%d "
-                "manual_review=%s confidence=%s",
-                BEDROCK_MODEL_ID, attempt, elapsed_ms,
-                remediation.get("manual_review_required") if isinstance(remediation, dict) else None,
-                remediation.get("confidence") if isinstance(remediation, dict) else None,
+                "files_changed=%d manual_review=%s confidence=%s",
+                BEDROCK_MODEL_ID, attempt, elapsed_ms, len(updated_files),
+                remediation.get("manual_review_required"),
+                remediation.get("confidence"),
             )
+            return updated_files, remediation
 
-            # Return as {path: content} dict to match the validator contract
-            return {primary_path: updated_template}
+        except ValueError as e:
+            # Malformed or truncated reply (json.JSONDecodeError is a ValueError).
+            last_err = e
+            logger.warning("Bedrock reply unusable attempt=%d: %s", attempt, e)
 
         except ClientError as e:
             last_err = e
