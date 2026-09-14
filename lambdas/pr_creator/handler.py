@@ -18,6 +18,8 @@ import urllib.request
 
 import boto3
 
+from reconciliation import STATUS_FAILED, STATUS_PR_OPENED, mark_events
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -35,25 +37,47 @@ _token_cache = {}
 def lambda_handler(event, context):
     tenant_id        = event["tenant_id"]
     event_id         = event["event_id"]
+    event_ids        = event.get("event_ids") or [event_id]   # every event this PR resolves
     stack_name       = event.get("stack_name", "")
     github_repo      = event["github_repo"]
     cloudtrail_event = event["cloudtrail_event"]
     updated_s3_keys  = event["updated_s3_keys"]           # {repo_path: s3_key}
+    remediation      = event.get("remediation") or {}
+    review_reasons   = event.get("review_reasons") or []
 
     secret_arn = event.get("github_token_secret_arn") or GITHUB_TOKEN_SECRET_ARN
 
-    logger.info("Creating PR for tenant=%s event=%s repo=%s files=%d",
-                tenant_id, event_id, github_repo, len(updated_s3_keys))
+    logger.info("Creating PR for tenant=%s event=%s repo=%s files=%d needs_review=%s",
+                tenant_id, event_id, github_repo, len(updated_s3_keys), bool(review_reasons))
 
-    # Fetch all updated file contents from S3
-    files = {path: fetch_from_s3(s3_key) for path, s3_key in updated_s3_keys.items()}
+    table = dynamodb.Table(RECONCILIATIONS_TABLE)
+    try:
+        # Fetch all updated file contents from S3
+        files = {path: fetch_from_s3(s3_key) for path, s3_key in updated_s3_keys.items()}
 
-    token       = get_github_token(secret_arn)
-    branch_name = f"drift/{tenant_id}/{event_id[:8]}"
+        token       = get_github_token(secret_arn)
+        branch_name = f"drift/{tenant_id}/{event_id[:8]}"
 
-    pr_url = open_pull_request(token, github_repo, branch_name,
-                               files, cloudtrail_event, stack_name)
-    update_reconciliation(tenant_id, event_id, pr_url)
+        pr_url = open_pull_request(
+            token, github_repo, branch_name, files,
+            title=build_pr_title(cloudtrail_event, stack_name, review_reasons),
+            description=build_pr_description(cloudtrail_event, stack_name, files,
+                                             remediation, review_reasons, len(event_ids)),
+            commit_message=build_commit_message(cloudtrail_event, files),
+        )
+    except Exception as e:
+        # Record the failure so the Orchestrator retries these events on its
+        # next run, then re-raise so the invocation is reported as an error.
+        try:
+            mark_events(table, tenant_id, event_ids, STATUS_FAILED, error=f"pr_creator: {e}")
+        except Exception as mark_err:
+            logger.error("Could not mark events failed: %s", mark_err)
+        raise
+
+    mark_events(table, tenant_id, event_ids, STATUS_PR_OPENED,
+                pr_url=pr_url,
+                needs_review=bool(review_reasons),
+                confidence=_confidence(remediation))
     logger.info("PR opened: %s", pr_url)
     return {"pr_url": pr_url}
 
@@ -88,13 +112,12 @@ def github_request(token, method, path, body=None):
 
 # ── PR creation ───────────────────────────────────────────────────────────────
 
-def open_pull_request(token, repo, branch_name, files, cloudtrail_event, stack_name):
+def open_pull_request(token, repo, branch_name, files, title, description, commit_message):
     """
     Create branch, commit all files atomically via Git Data API, open PR.
     files = {repo_path: content}
     """
     owner, repo_name = repo.split("/", 1)
-    event_name       = cloudtrail_event.get("eventName", "unknown")
 
     # Get default branch + its latest commit SHA
     repo_info      = github_request(token, "GET", f"/repos/{owner}/{repo_name}")
@@ -141,9 +164,8 @@ def open_pull_request(token, repo, branch_name, files, cloudtrail_event, stack_n
     })
 
     # Create commit
-    files_summary = ", ".join(p.rsplit("/", 1)[-1] for p in files)
     new_commit = github_request(token, "POST", f"/repos/{owner}/{repo_name}/git/commits", {
-        "message": f"fix(drift): update {files_summary} after {event_name}",
+        "message": commit_message,
         "tree":    new_tree["sha"],
         "parents": [branch_ref["object"]["sha"]],
     })
@@ -156,8 +178,8 @@ def open_pull_request(token, repo, branch_name, files, cloudtrail_event, stack_n
 
     # Open PR (idempotent)
     pr_body_text = {
-        "title": f"[Drift] {event_name} detected on {stack_name}",
-        "body":  build_pr_description(cloudtrail_event, stack_name, files),
+        "title": title,
+        "body":  description,
         "head":  branch_name,
         "base":  default_branch,
     }
@@ -295,30 +317,82 @@ def fetch_from_s3(s3_key):
     return resp["Body"].read().decode("utf-8")
 
 
-def build_pr_description(cloudtrail_event, stack_name, files):
+def build_commit_message(cloudtrail_event, files):
+    event_name    = cloudtrail_event.get("eventName", "unknown")
+    files_summary = ", ".join(p.rsplit("/", 1)[-1] for p in sorted(files))
+    return f"fix(drift): update {files_summary} after {event_name}"
+
+
+def build_pr_title(cloudtrail_event, stack_name, review_reasons):
+    event_name = cloudtrail_event.get("eventName", "unknown")
+    tag        = "[Drift – needs review]" if review_reasons else "[Drift]"
+    return f"{tag} {event_name} detected on {stack_name}"
+
+
+def build_pr_description(cloudtrail_event, stack_name, files,
+                         remediation=None, review_reasons=None, event_count=1):
+    """
+    PR body: a warning banner when the change needs careful review, the facts
+    of the drift, then the model's own explanation of what it changed and why.
+    """
+    remediation    = remediation or {}
+    review_reasons = review_reasons or []
     event_name = cloudtrail_event.get("eventName", "unknown")
     event_time = cloudtrail_event.get("eventTime", "unknown")
-    user       = cloudtrail_event.get("userIdentity", {}).get("arn", "unknown")
+    user       = (cloudtrail_event.get("userIdentity") or {}).get("arn", "unknown")
+    confidence = _confidence(remediation)
+
+    parts = []
+
+    if review_reasons:
+        banner = ["> [!WARNING]", "> **This change needs careful review before merging.**"]
+        banner += [f"> - {reason}" for reason in review_reasons]
+        parts.append("\n".join(banner))
+
+    rows = [
+        ("Stack", f"`{stack_name}`"),
+        ("Event", f"`{event_name}`" + (f" (+{event_count - 1} more)" if event_count > 1 else "")),
+        ("Time",  event_time),
+        ("Actor", f"`{user}`"),
+    ]
+    if confidence is not None:
+        rows.append(("Model confidence", f"{confidence:.0%}"))
+    table = "\n".join(f"| {name} | {value} |" for name, value in rows)
+    parts.append(f"## Drift Detected\n\n| Field | Value |\n|---|---|\n{table}")
+
+    for heading, key in (("What changed", "summary"), ("Root cause", "root_cause")):
+        text = remediation.get(key)
+        if isinstance(text, str) and text.strip():
+            parts.append(f"### {heading}\n\n{text.strip()}")
+
+    for heading, key in (("Proposed changes", "proposed_changes"), ("Warnings", "warnings")):
+        items = _bullets(remediation.get(key))
+        if items:
+            parts.append(f"### {heading}\n\n{items}")
+
     files_list = "\n".join(f"- `{p}`" for p in sorted(files))
-    return (
-        f"## Drift Detected\n\n"
-        f"| Field | Value |\n"
-        f"|---|---|\n"
-        f"| Stack | `{stack_name}` |\n"
-        f"| Event | `{event_name}` |\n"
-        f"| Time | {event_time} |\n"
-        f"| Actor | `{user}` |\n\n"
-        f"**Files updated:**\n{files_list}\n\n"
-        f"Review the changes, ensure they match the intended infrastructure state, "
-        f"then merge to reconcile."
+    parts.append(f"**Files updated:**\n{files_list}")
+    parts.append(
+        "Review the changes, ensure they match the intended infrastructure state, "
+        "then merge to reconcile."
     )
+    return "\n\n".join(parts)
 
 
-def update_reconciliation(tenant_id, event_id, pr_url):
-    table = dynamodb.Table(RECONCILIATIONS_TABLE)
-    table.update_item(
-        Key={"tenant_id": tenant_id, "event_id": event_id},
-        UpdateExpression="SET #s = :s, pr_url = :pr",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": "pr_opened", ":pr": pr_url},
-    )
+def _confidence(remediation):
+    value = remediation.get("confidence")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _bullets(items, limit=20):
+    """Render a model-supplied list as markdown bullets; anything else is ignored."""
+    if not isinstance(items, list):
+        return ""
+    lines = []
+    for item in items[:limit]:
+        text = item if isinstance(item, str) else json.dumps(item, default=str)
+        if text.strip():
+            lines.append(f"- {text.strip()}")
+    return "\n".join(lines)
