@@ -112,7 +112,10 @@ def invoke_pr_creator(event, s3_keys):
         "primary_path":            event.get("primary_path"),
         "github_repo":             event["github_repo"],
         "github_token_secret_arn": event.get("github_token_secret_arn", ""),
+        "event_ids":               event.get("event_ids") or [event["event_id"]],
         "cloudtrail_event":        event["cloudtrail_event"],
+        "remediation":             event.get("remediation") or {},
+        "review_reasons":          event.get("review_reasons") or [],
         "updated_s3_keys":         s3_keys,   # {repo_path: s3_key}
     }
     lambda_client.invoke(
