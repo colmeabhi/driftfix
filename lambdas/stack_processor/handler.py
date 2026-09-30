@@ -28,9 +28,12 @@ import time
 import random
 from botocore.exceptions import ClientError
 
+from reconciliation import STATUS_FAILED, STATUS_NO_CHANGE, mark_events
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+dynamodb        = boto3.resource("dynamodb")
 sts_client      = boto3.client("sts")
 lambda_client   = boto3.client("lambda")
 secretsmanager  = boto3.client("secretsmanager")
@@ -42,6 +45,10 @@ BEDROCK_MODEL_ID        = os.environ.get("BEDROCK_MODEL_ID", "").strip()
 
 # INTERIM: Gemini — remove when switching to Bedrock
 GEMINI_API_KEY_SECRET_ARN = os.environ.get("GEMINI_API_KEY_SECRET_ARN", "")
+
+# A change the model is less sure about than this still gets a pull request,
+# but one that is clearly marked as needing careful review.
+REVIEW_CONFIDENCE_THRESHOLD = float(os.environ.get("REVIEW_CONFIDENCE_THRESHOLD", "0.6"))
 
 _secret_cache = {}
 
@@ -59,8 +66,19 @@ def lambda_handler(event, context):
     logger.info("Processing stack=%s tenant=%s events=%d",
                 stack_name, tenant_id, len(cloudtrail_events))
 
-    creds  = assume_cross_account_role(tenant["role_arn"], tenant["external_id"], stack_name)
-    region = cloudtrail_events[0].get("awsRegion", "us-east-1")
+    try:
+        return process_stack(tenant, stack_name, cloudtrail_events)
+    except Exception as e:
+        # Record the failure so the Orchestrator retries these events on its
+        # next run, then re-raise so the invocation still reaches the DLQ.
+        _mark(tenant_id, cloudtrail_events, STATUS_FAILED, error=f"stack_processor: {e}")
+        raise
+
+
+def process_stack(tenant, stack_name, cloudtrail_events):
+    tenant_id = tenant["tenant_id"]
+    creds     = assume_cross_account_role(tenant["role_arn"], tenant["external_id"], stack_name)
+    region    = cloudtrail_events[0].get("awsRegion", "us-east-1")
 
     github_token = _get_secret(tenant.get("github_token_secret_arn", ""))
     github_repo  = tenant.get("github_repo", "")
@@ -69,11 +87,60 @@ def lambda_handler(event, context):
     # primary_path = the template file path (None if CFn fallback was used)
     files, primary_path = fetch_files(creds, stack_name, region, github_token, github_repo)
 
-    # updated_files = only the files the LLM changed (subset of files keys)
-    updated_files, _remediation = invoke_bedrock(files, cloudtrail_events)
+    updated_files, remediation = invoke_bedrock(files, cloudtrail_events)
+    updated_files = changed_files(files, updated_files)
 
-    invoke_validator(tenant, stack_name, cloudtrail_events[0],
-                     files, updated_files, primary_path)
+    if not updated_files:
+        # Nothing to propose: either the evidence was insufficient or the files
+        # already describe the change. No pull request is opened.
+        reason = str(remediation.get("summary") or "The model proposed no change.")
+        logger.info("No change for stack=%s: %s", stack_name, reason)
+        _mark(tenant_id, cloudtrail_events, STATUS_NO_CHANGE,
+              reason=reason,
+              manual_review_required=bool(remediation.get("manual_review_required")))
+        return {"status": STATUS_NO_CHANGE}
+
+    invoke_validator(tenant, stack_name, cloudtrail_events, updated_files,
+                     primary_path, remediation, review_reasons(remediation))
+    return {"status": "sent_to_validator"}
+
+
+def changed_files(original_files, updated_files):
+    """Keep only the files whose content really differs from the original."""
+    return {
+        path: content
+        for path, content in updated_files.items()
+        if content.strip() != original_files.get(path, "").strip()
+    }
+
+
+def review_reasons(remediation):
+    """
+    Why a human should look at this change with extra care — an empty list
+    means the model was confident. Used to mark the pull request.
+    """
+    reasons = []
+    if remediation.get("manual_review_required"):
+        reasons.append("The model flagged this change for manual review.")
+
+    confidence = remediation.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        reasons.append("The model did not report a confidence score.")
+    elif confidence < REVIEW_CONFIDENCE_THRESHOLD:
+        reasons.append(
+            f"The model's confidence ({confidence:.2f}) is below the "
+            f"{REVIEW_CONFIDENCE_THRESHOLD:.2f} threshold."
+        )
+    return reasons
+
+
+def _mark(tenant_id, cloudtrail_events, status, **attrs):
+    """Best-effort status update — a DynamoDB error must not mask the real outcome."""
+    try:
+        mark_events(dynamodb.Table(RECONCILIATIONS_TABLE), tenant_id,
+                    [e["eventID"] for e in cloudtrail_events], status, **attrs)
+    except Exception as e:
+        logger.error("Could not mark events %s: %s", status, e)
 
 
 # ── Template + parameter file fetching ───────────────────────────────────────
@@ -530,16 +597,19 @@ def _get_secret(secret_arn):
     return _secret_cache[secret_arn]
 
 
-def invoke_validator(tenant, stack_name, cloudtrail_event,
-                     original_files, updated_files, primary_path):
+def invoke_validator(tenant, stack_name, cloudtrail_events, updated_files,
+                     primary_path, remediation, reasons):
+    first_event = cloudtrail_events[0]
     payload = {
         "tenant_id":               tenant["tenant_id"],
-        "event_id":                cloudtrail_event["eventID"],
+        "event_id":                first_event["eventID"],   # names the branch and S3 prefix
+        "event_ids":               [e["eventID"] for e in cloudtrail_events],
         "stack_name":              stack_name,
-        "original_files":          original_files,   # {path: content} — for context
         "updated_files":           updated_files,     # {path: content} — only changed files
         "primary_path":            primary_path,      # template file path (for PR title/description)
-        "cloudtrail_event":        cloudtrail_event,
+        "cloudtrail_event":        first_event,
+        "remediation":             remediation,       # the model's explanation, shown in the PR
+        "review_reasons":          reasons,           # non-empty → PR is marked "needs review"
         "github_repo":             tenant.get("github_repo", ""),
         "github_token_secret_arn": tenant.get("github_token_secret_arn", ""),
         "retry_count":             0,
@@ -547,5 +617,5 @@ def invoke_validator(tenant, stack_name, cloudtrail_event,
     lambda_client.invoke(
         FunctionName=VALIDATOR_FUNCTION_NAME,
         InvocationType="Event",
-        Payload=json.dumps(payload),
+        Payload=json.dumps(payload, default=str),
     )
