@@ -7,6 +7,9 @@ Template source priority:
   1. GitHub repo (preserves parameters, comments, structure, separate param files)
   2. CloudFormation get_template (fallback if GitHub unavailable)
 
+The Validator re-invokes this Lambda with lint_feedback when the output fails
+cfn-lint, so the model can correct it (up to MAX_RETRIES times).
+
 When GitHub is used, the directory next to the template file is scanned for
 parameter files (parameters.json, params.yaml, prod.json, etc.) and they are
 passed to the LLM alongside the template. The LLM returns only the files it
@@ -67,7 +70,9 @@ def lambda_handler(event, context):
                 stack_name, tenant_id, len(cloudtrail_events))
 
     try:
-        return process_stack(tenant, stack_name, cloudtrail_events)
+        return process_stack(tenant, stack_name, cloudtrail_events,
+                             retry_count=event.get("retry_count", 0),
+                             lint_feedback=event.get("lint_feedback"))
     except Exception as e:
         # Record the failure so the Orchestrator retries these events on its
         # next run, then re-raise so the invocation still reaches the DLQ.
@@ -75,7 +80,11 @@ def lambda_handler(event, context):
         raise
 
 
-def process_stack(tenant, stack_name, cloudtrail_events):
+def process_stack(tenant, stack_name, cloudtrail_events, retry_count=0, lint_feedback=None):
+    """
+    lint_feedback is set when the Validator sends a stack back because the
+    previous output failed cfn-lint: {"files": {path: content}, "errors": {path: [..]}}.
+    """
     tenant_id = tenant["tenant_id"]
     creds     = assume_cross_account_role(tenant["role_arn"], tenant["external_id"], stack_name)
     region    = cloudtrail_events[0].get("awsRegion", "us-east-1")
@@ -87,8 +96,11 @@ def process_stack(tenant, stack_name, cloudtrail_events):
     # primary_path = the template file path (None if CFn fallback was used)
     files, primary_path = fetch_files(creds, stack_name, region, github_token, github_repo)
 
-    updated_files, remediation = invoke_bedrock(files, cloudtrail_events)
+    updated_files, remediation = invoke_bedrock(files, cloudtrail_events, lint_feedback)
     updated_files = changed_files(files, updated_files)
+
+    if not updated_files and lint_feedback:
+        raise RuntimeError("Model returned no corrected files for the cfn-lint errors")
 
     if not updated_files:
         # Nothing to propose: either the evidence was insufficient or the files
@@ -101,7 +113,7 @@ def process_stack(tenant, stack_name, cloudtrail_events):
         return {"status": STATUS_NO_CHANGE}
 
     invoke_validator(tenant, stack_name, cloudtrail_events, updated_files,
-                     primary_path, remediation, review_reasons(remediation))
+                     primary_path, remediation, review_reasons(remediation), retry_count)
     return {"status": "sent_to_validator"}
 
 
@@ -455,7 +467,15 @@ _INSTRUCTIONS = (
 )
 
 
-def build_prompt(files, cloudtrail_events):
+_RETRY_INSTRUCTIONS = (
+    "\nYour previous answer failed cfn-lint validation. PREVIOUS_ATTEMPT holds the files "
+    "you returned and the errors cfn-lint reported for each of them.\n"
+    "Return corrected files that still apply the changes in EVIDENCE and fix every listed "
+    "error. Start from FILES, not from the rejected output.\n"
+)
+
+
+def build_prompt(files, cloudtrail_events, lint_feedback=None):
     user_input = {
         "files": files,
         "evidence": {
@@ -465,7 +485,14 @@ def build_prompt(files, cloudtrail_events):
             "note": "Only use the evidence provided; do not invent changes.",
         },
     }
-    return _INSTRUCTIONS + "\nINPUT:\n" + json.dumps(user_input, default=str)
+    instructions = _INSTRUCTIONS
+    if lint_feedback:
+        instructions += _RETRY_INSTRUCTIONS
+        user_input["previous_attempt"] = {
+            "files":       lint_feedback.get("files", {}),
+            "lint_errors": lint_feedback.get("errors", {}),
+        }
+    return instructions + "\nINPUT:\n" + json.dumps(user_input, default=str)
 
 
 def parse_model_response(model_text, files):
@@ -493,18 +520,19 @@ def parse_model_response(model_text, files):
     return updated_files, remediation if isinstance(remediation, dict) else {}
 
 
-def invoke_bedrock(files, cloudtrail_events):
+def invoke_bedrock(files, cloudtrail_events, lint_feedback=None):
     """
     Ask the model to bring the stack's files in line with the CloudTrail evidence.
     Inputs:  files = {path: content} (template + parameter files),
-             cloudtrail_events = list of CloudTrail records.
+             cloudtrail_events = list of CloudTrail records,
+             lint_feedback = the rejected output and its cfn-lint errors, on a retry.
     Returns: ({path: updated_content} for the files the model changed, remediation).
     Model is read from BEDROCK_MODEL_ID env var.
     """
     if not BEDROCK_MODEL_ID:
         raise RuntimeError("BEDROCK_MODEL_ID env var is not set")
 
-    prompt = build_prompt(files, cloudtrail_events)
+    prompt = build_prompt(files, cloudtrail_events, lint_feedback)
 
     max_attempts = 4
     base_sleep = 0.6
@@ -598,9 +626,13 @@ def _get_secret(secret_arn):
 
 
 def invoke_validator(tenant, stack_name, cloudtrail_events, updated_files,
-                     primary_path, remediation, reasons):
+                     primary_path, remediation, reasons, retry_count=0):
     first_event = cloudtrail_events[0]
     payload = {
+        # tenant + cloudtrail_events let the Validator send the stack back here
+        # for another attempt if the output fails cfn-lint.
+        "tenant":                  tenant,
+        "cloudtrail_events":       cloudtrail_events,
         "tenant_id":               tenant["tenant_id"],
         "event_id":                first_event["eventID"],   # names the branch and S3 prefix
         "event_ids":               [e["eventID"] for e in cloudtrail_events],
@@ -612,7 +644,7 @@ def invoke_validator(tenant, stack_name, cloudtrail_events, updated_files,
         "review_reasons":          reasons,           # non-empty → PR is marked "needs review"
         "github_repo":             tenant.get("github_repo", ""),
         "github_token_secret_arn": tenant.get("github_token_secret_arn", ""),
-        "retry_count":             0,
+        "retry_count":             retry_count,
     }
     lambda_client.invoke(
         FunctionName=VALIDATOR_FUNCTION_NAME,

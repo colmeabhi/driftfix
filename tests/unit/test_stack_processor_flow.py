@@ -99,3 +99,14 @@ def test_low_confidence_change_is_flagged_for_review(pipeline, lambda_client):
     _run()
     reasons = lambda_client.calls[0][1]["review_reasons"]
     assert len(reasons) == 1 and "0.40" in reasons[0] and "0.60" in reasons[0]
+
+
+def test_retry_that_fixes_nothing_fails_instead_of_reporting_no_change(pipeline, table):
+    pipeline({})
+    with pytest.raises(RuntimeError, match="no corrected files"):
+        sp.lambda_handler({
+            "tenant": TENANT, "stack_name": "web", "cloudtrail_events": EVENTS,
+            "retry_count": 1,
+            "lint_feedback": {"files": {TEMPLATE: "bad"}, "errors": {TEMPLATE: ["E1"]}},
+        }, None)
+    assert table.statuses() == {"e1": rec.STATUS_FAILED, "e2": rec.STATUS_FAILED}
