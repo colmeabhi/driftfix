@@ -128,6 +128,18 @@ resource "aws_iam_role_policy" "validator" {
         Effect   = "Allow"
         Action   = ["s3:PutObject", "s3:GetObject"]
         Resource = "${aws_s3_bucket.audit.arn}/*"
+      },
+      {
+        Sid      = "DynamoDB"
+        Effect   = "Allow"
+        Action   = ["dynamodb:UpdateItem"]
+        Resource = aws_dynamodb_table.reconciliations.arn
+      },
+      {
+        Sid      = "DLQ"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = aws_sqs_queue.processor_dlq.arn
       }
     ]
   })
