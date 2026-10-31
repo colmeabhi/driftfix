@@ -1,3 +1,10 @@
+locals {
+  # The Stack Processor and the Validator invoke each other (the Validator sends
+  # a stack back when cfn-lint fails). Naming the Stack Processor here, rather
+  # than through its resource, keeps Terraform free of a dependency cycle.
+  stack_processor_name = "${var.project}-stack-processor"
+}
+
 resource "aws_s3_bucket" "audit" {
   bucket = "${var.project}-audit-${data.aws_caller_identity.current.account_id}"
 }
@@ -42,7 +49,7 @@ resource "aws_lambda_function_event_invoke_config" "processor_destinations" {
 
 # ── Stack Processor Lambda ────────────────────────────────────────────────────
 resource "aws_lambda_function" "stack_processor" {
-  function_name = "${var.project}-stack-processor"
+  function_name = local.stack_processor_name
   role          = aws_iam_role.stack_processor.arn
   handler       = "handler.lambda_handler"
   runtime       = "python3.12"
@@ -87,9 +94,21 @@ resource "aws_lambda_function" "validator" {
 
   environment {
     variables = {
-      AUDIT_BUCKET             = aws_s3_bucket.audit.bucket
-      MAX_RETRIES              = "3"
-      PR_CREATOR_FUNCTION_NAME = aws_lambda_function.pr_creator.function_name
+      AUDIT_BUCKET                   = aws_s3_bucket.audit.bucket
+      MAX_RETRIES                    = "3"
+      PR_CREATOR_FUNCTION_NAME       = aws_lambda_function.pr_creator.function_name
+      STACK_PROCESSOR_FUNCTION_NAME  = local.stack_processor_name
+      DYNAMODB_RECONCILIATIONS_TABLE = aws_dynamodb_table.reconciliations.name
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "validator_destinations" {
+  function_name = aws_lambda_function.validator.function_name
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.processor_dlq.arn
     }
   }
 }
@@ -138,6 +157,19 @@ resource "aws_iam_role_policy" "stack_processor_invoke_validator" {
       Effect   = "Allow"
       Action   = ["lambda:InvokeFunction"]
       Resource = aws_lambda_function.validator.arn
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "validator_invoke_stack_processor" {
+  role = aws_iam_role.validator.id
+  name = "invoke-stack-processor"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lambda:InvokeFunction"]
+      Resource = aws_lambda_function.stack_processor.arn
     }]
   })
 }
