@@ -82,7 +82,7 @@ Orchestrator Lambda (drift-detector-processor)
     ├── for each tenant in DynamoDB...
     │       │
     │       ├── assume cross-account role via STS
-    │       ├── list CloudTrail log files from last 24h
+    │       ├── list CloudTrail log files from last 72h
     │       ├── parse + filter write events
     │       ├── deduplicate against reconciliations table
     │       ├── group events by stack (tag resolver)
@@ -94,14 +94,15 @@ Orchestrator Lambda (drift-detector-processor)
     │               │
     │               ├── assume cross-account role via STS
     │               ├── fetch CloudFormation template
-    │               ├── call Bedrock → updated template
+    │               ├── call Bedrock → updated template / parameter files
+    │               ├── no change proposed → record no_change, stop
     │               │
     │               ▼
     │           Validator Lambda
     │               │
     │               ├── run cfn-lint
     │               ├── pass → store in S3
-    │               ├── fail → retry with Bedrock (up to 3x)
+    │               ├── fail → back to Stack Processor with the errors (up to 3x)
     │               │
     │               ▼
     │           PR Creator Lambda
@@ -135,21 +136,30 @@ For each tenant, calls `sts:AssumeRole` with the tenant's `role_arn` and `extern
 
 ### Step 3 — Read CloudTrail logs
 
-Using the temporary credentials, lists objects in the customer's CloudTrail S3 bucket under `AWSLogs/` modified in the last 24 hours. Each file is a gzip-compressed JSON containing up to hundreds of CloudTrail records.
+Using the temporary credentials, lists objects in the customer's CloudTrail S3 bucket under `AWSLogs/` modified in the last 72 hours (`LOOKBACK_HOURS`). The window is three times the daily schedule so that an event whose processing failed is still visible to the next two runs; deduplication makes the overlap safe. Each file is a gzip-compressed JSON containing up to hundreds of CloudTrail records.
 
 ### Step 4 — Filter write events
 
 Each CloudTrail record has a `readOnly` flag and an `eventName`. The Orchestrator keeps only events where:
 - `readOnly` is `false`
+- there is no `errorCode` (a failed API call changed nothing)
+- the change did not come from a CloudFormation deployment: the event source is not `cloudformation.amazonaws.com`, and neither `userIdentity.invokedBy` nor `sourceIPAddress` is `cloudformation.amazonaws.com` (the stamp CloudTrail puts on calls CloudFormation makes while deploying a stack)
 - `eventName` starts with `Create`, `Update`, `Delete`, `Put`, `Modify`, `Attach`, `Detach`, `Associate`, or `Disassociate`
 
 This filters out ~90% of CloudTrail volume (DescribeInstances, ListBuckets, etc.) which represent reads that cannot cause drift.
 
 ### Step 5 — Deduplicate
 
-Before processing, the Orchestrator calls `BatchGetItem` on the `drift-detector-reconciliations` table to check which `event_id` values have already been seen. Events that already have a record are skipped. This prevents reprocessing if the Lambda retries or the cron fires twice.
+Before processing, the Orchestrator calls `BatchGetItem` on the `drift-detector-reconciliations` table and decides per event from its record (`lambdas/shared/reconciliation.py`):
 
-Events that pass deduplication are immediately written to the reconciliations table with `status: queued` — this acts as a lock so that even if the Lambda crashes and retries mid-run, those events won't be picked up again.
+| Existing record | Decision |
+|---|---|
+| none | process |
+| `pr_opened` or `no_change` | skip — finished |
+| `queued`, less than 2 hours old | skip — in flight |
+| `failed`, or `queued` for more than 2 hours (the pipeline died without reporting back) | process again, until 3 attempts have been made |
+
+Events to process are written with `status: queued` and an incremented `attempts` counter. A downstream Lambda later sets `pr_opened`, `no_change` or `failed`. Records expire after 30 days, which is longer than the lookback window, so a finished event is never mistaken for a new one.
 
 ### Step 6 — Group events by stack
 
@@ -200,18 +210,22 @@ Re-assumes the customer's cross-account role independently (does not reuse the O
 
 Calls `cloudformation:GetTemplate` with `TemplateStage: Original` to get the template as it was when the stack was last deployed. This is the template that needs to be updated to reflect the drift.
 
-### Step 3 — Call Bedrock *(not yet implemented)*
+### Step 3 — Call Bedrock
 
-Sends a prompt to AWS Bedrock (Claude) containing:
-- The current CloudFormation template
-- All CloudTrail events for this stack from the last 24 hours
-- A system prompt instructing the model to return an updated YAML template that reflects all the changes
+Sends a prompt to Amazon Bedrock (model set by `BEDROCK_MODEL_ID`) containing:
+- The template and any parameter files found next to it in the repository, keyed by path
+- The CloudTrail events for this stack (up to 50)
+- Instructions to change only what the evidence supports, and to change a value in the parameter file when that is where it is set
+- On a retry: the previous output and the cfn-lint errors it produced
 
-Bedrock returns an updated template. This is the core AI step.
+Bedrock returns JSON with `updated_files` (the complete new content of each file it changed) and `remediation` (summary, root cause, confidence, proposed changes, warnings, `manual_review_required`). A reply that is not valid JSON is retried.
 
-### Step 4 — Invoke Validator
+### Step 4 — Decide what to do with the answer
 
-Passes the updated template to the Validator Lambda asynchronously, along with the tenant config, stack name, and the representative CloudTrail event.
+- **Nothing changed** (no files returned, or files identical to the originals): the events are marked `no_change` with the model's reason and no pull request is opened.
+- **Otherwise** the changed files go to the Validator, together with the remediation and a list of review reasons. A reason is added when the model set `manual_review_required`, or when its confidence is below `REVIEW_CONFIDENCE_THRESHOLD` (0.6) or missing.
+
+If this Lambda fails, the events are marked `failed` so the Orchestrator retries them on a later run.
 
 ---
 
@@ -238,10 +252,11 @@ Receive template from Stack Processor
    │     ┌────┴────┐
    │    Yes        No
    │     │          │
-   │   re-invoke   raise RuntimeError
-   │   Bedrock     → message goes to DLQ
-   │   with errors → CloudWatch alarm fires
-   │   appended    → human investigates
+   │   re-invoke   mark events failed,
+   │   Stack       raise RuntimeError
+   │   Processor   → message goes to DLQ
+   │   with the    → CloudWatch alarm fires
+   │   errors      → human investigates
    │
    ▼
 Store template in S3
@@ -251,9 +266,11 @@ Store template in S3
 Invoke PR Creator Lambda
 ```
 
-The retry prompt appends cfn-lint's error output to the original prompt: *"Your previous attempt had these errors, fix them: [errors]"*. This iterative refinement loop is capped at 3 attempts.
+On failure the Validator invokes the Stack Processor again with `retry_count + 1` and `lint_feedback` (the rejected files and the errors per file). The Stack Processor adds both to the prompt and the corrected output comes back through the Validator. The loop is capped at `MAX_RETRIES` (3).
 
-If all retries are exhausted, the Lambda raises an exception. The SQS DLQ receives the failed invocation record, and a CloudWatch alarm fires when the DLQ is non-empty.
+Only cfn-lint findings of level `Error` block a template. Warnings are logged, because hand-written templates often carry warnings the model did not introduce.
+
+If all retries are exhausted, the events are marked `failed` and the Lambda raises an exception. The SQS DLQ receives the failed invocation record, and a CloudWatch alarm fires when the DLQ is non-empty. The Orchestrator retries `failed` events on its next run.
 
 ---
 
@@ -280,17 +297,23 @@ Commits the updated YAML template to the branch. If the file already exists on t
 
 ### Step 5 — Open pull request (idempotent)
 
-Opens a PR with title `[Drift] <eventName> detected — template updated` and a description table showing the event name, time, and the actor who made the change.
+Opens a PR titled `[Drift] <eventName> detected on <stack>`. The description has a table with the stack, event, time, actor and the model's confidence, followed by the model's own summary, root cause, proposed changes and warnings.
+
+When the Stack Processor supplied review reasons, the title becomes `[Drift – needs review] ...` and the description opens with a warning banner listing them.
 
 If a PR already exists for this branch (retry), it finds and returns the existing PR URL rather than trying to open a duplicate.
 
 ### Step 6 — Update reconciliation record
 
-Updates the tenant's event record in `drift-detector-reconciliations`:
+Updates the record of every event the pull request resolves (all events grouped under the stack, not only the first) in `drift-detector-reconciliations`:
 ```
-status:  "pr_opened"
-pr_url:  "https://github.com/owner/repo/pull/123"
+status:        "pr_opened"
+pr_url:        "https://github.com/owner/repo/pull/123"
+needs_review:  false
+confidence:    0.82
 ```
+
+If opening the pull request fails, the events are marked `failed` instead.
 
 ---
 
@@ -440,6 +463,5 @@ Drift reconciled. Declared state matches actual state.
 
 | Item | Status | Impact |
 |---|---|---|
-| Bedrock integration | Stubbed — raises `NotImplementedError` | Stack Processor cannot generate updated templates yet — the pipeline stops here |
 | Template file path resolution | Hardcoded to `template.yaml` | PR Creator always commits to `template.yaml` regardless of the actual file path in the repo |
 | Budget alerts | Not configured | No email notification if spend exceeds threshold |
