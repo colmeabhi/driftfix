@@ -14,11 +14,12 @@ Validator Lambda.  The script emulates Lambda's async invocation behavior:
 1 original delivery + 2 automatic retries, each carrying retry_count=0
 (Lambda re-delivers the original event payload unchanged on every attempt).
 
-Because retry_count=0 < MAX_RETRIES=3 and lint errors are present, the
-Validator raises NotImplementedError on every attempt — the Bedrock-powered
-retry-and-fix loop is not yet implemented.
+The payload is sent straight to the Validator, so it carries no tenant
+context for the Stack Processor to regenerate the template from. The
+Validator cannot run its retry-and-fix loop, marks the event failed and
+raises RuntimeError on every attempt.
 
-  cfn-lint violations → NotImplementedError → FunctionError  (×3 attempts)
+  cfn-lint violations → RuntimeError → FunctionError  (×3 attempts)
                         ↓  after all retries exhausted
                         script routes event to SQS DLQ  ← alarm fires
 

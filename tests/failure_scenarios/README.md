@@ -21,8 +21,9 @@ the **drift-detector-overview** and **drift-detector-cost** dashboards at:
 ### Description
 
 A CloudFormation template containing four deliberate cfn-lint violations is delivered
-to the Validator Lambda.  Because the Bedrock-powered fix loop is not yet implemented,
-the Validator raises `NotImplementedError` on every attempt.  The script emulates
+to the Validator Lambda.  The script invokes the Validator directly, so the payload has
+no tenant context for the Stack Processor to regenerate the template from; the Validator
+marks the event failed and raises `RuntimeError` on every attempt.  The script emulates
 Lambda's async invocation behavior: one original delivery followed by two automatic
 retries, all carrying the same `retry_count=0` payload (Lambda re-delivers the
 original event unchanged).  After all three attempts fail, the script writes a
@@ -33,7 +34,7 @@ the structure Lambda uses for its on-failure async destination.
 
 | Phase | Behavior |
 |---|---|
-| Delivery 1–3 | Validator receives broken template, cfn-lint reports violations, `NotImplementedError` raised → `FunctionError` returned each time |
+| Delivery 1–3 | Validator receives broken template, cfn-lint reports violations, `RuntimeError` raised → `FunctionError` returned each time |
 | After attempt 3 | Script routes event to SQS DLQ (approximateInvokeCount = 3) |
 | CloudWatch | Lambda/Errors spike of 3 on `drift-detector-validator`; DLQ depth = 1 |
 | Alarm | `drift-detector-validator-errors` transitions to ALARM (threshold = 0) |
