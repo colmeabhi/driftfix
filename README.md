@@ -17,18 +17,27 @@ Deployed via `terraform/saas/`. The pipeline runs on a daily EventBridge schedul
 ```
 EventBridge (7 AM UTC)
     └── Orchestrator Lambda
-            ├── Reads CloudTrail logs from each customer's S3 bucket (cross-account)
-            ├── Deduplicates events against DynamoDB
+            ├── Reads the last 72h of CloudTrail logs from each customer's S3 bucket (cross-account)
+            ├── Keeps successful manual writes (CloudFormation's own deploys are ignored)
+            ├── Deduplicates events against DynamoDB; failed or stuck events are retried (max 3 attempts)
             ├── Groups changes by CloudFormation stack
             └── Fans out one Stack Processor Lambda per affected stack (parallel)
                     └── Stack Processor
-                            ├── Calls Amazon Bedrock to generate updated CFn template
+                            ├── Sends the template and its parameter files to Amazon Bedrock
+                            ├── No change proposed → records `no_change`, opens no PR
                             └── Validator Lambda
-                                    ├── Runs cfn-lint (up to 3 retries with Bedrock)
+                                    ├── Runs cfn-lint; on errors sends the stack back to the
+                                    │   Stack Processor with the errors (up to 3 retries)
                                     └── PR Creator Lambda
-                                            ├── Commits updated template to GitHub branch
-                                            └── Opens pull request
+                                            ├── Commits the changed files to a GitHub branch
+                                            └── Opens a pull request with the model's explanation,
+                                                marked "needs review" when the model asked for
+                                                manual review or its confidence is below 0.6
 ```
+
+Every CloudTrail event has a record in the reconciliations table that moves through
+`queued` → `pr_opened`, `no_change` or `failed`. The lifecycle is defined in
+[`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py).
 
 A **Health Check Lambda** runs every 5 minutes independently, probing all pipeline components and publishing custom `drift-detector/HealthCheck` metrics to CloudWatch.
 
@@ -243,7 +252,8 @@ Built as a team project by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan 
 │   ├── stack_processor/    Fetches CFn template, calls Bedrock, invokes validator
 │   ├── validator/          Runs cfn-lint, retries with Bedrock up to 3×
 │   ├── pr_creator/         Creates GitHub branch, commits template, opens PR
-│   └── health_check/       Probes all pipeline components every 5 minutes
+│   ├── health_check/       Probes all pipeline components every 5 minutes
+│   └── shared/             Event status lifecycle, packaged into every Lambda
 ├── results/                Load test artifacts
 │   ├── report.md           Full load test report
 │   ├── G1–G7_*.png         Performance graphs
@@ -257,6 +267,7 @@ Built as a team project by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan 
 │   │                       CloudWatch dashboards/alarms, health check)
 │   └── customer/           Customer-side infrastructure (CloudTrail, S3, IAM cross-account role)
 ├── tests/
+│   ├── unit/               Unit tests for the pipeline logic (no AWS needed): pytest tests/unit
 │   ├── e2e.py              End-to-end integration tests
 │   └── failure_scenarios/  Dedicated failure scenario scripts
 │       ├── README.md
