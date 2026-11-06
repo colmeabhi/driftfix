@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 170" width="960" height="170" role="img" aria-label="Customer onboarding in four steps.">
+<title>Customer onboarding in four steps.</title>
+<style>
+svg { font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+.bg     { fill: #ffffff; stroke: #d1d9e0; }
+.ink    { fill: #1f2328; }
+.muted  { fill: #59636e; }
+.halo   { paint-order: stroke; stroke: #ffffff; stroke-width: 5px; stroke-linejoin: round; }
+.region { fill: #64748b; fill-opacity: .05; stroke: #8c959f; stroke-width: 1.5; stroke-dasharray: 3 5; }
+.mono   { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.title  { font-size: 14px; font-weight: 600; }
+.sub    { font-size: 12px; }
+.label  { font-size: 12px; }
+.badge  { font-size: 13px; font-weight: 600; }
+.edge   { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.flow   { stroke-dasharray: 6 7; animation: march 1s linear infinite; }
+@keyframes march { to { stroke-dashoffset: -13; } }
+@media (prefers-color-scheme: dark) {
+  .bg    { fill: #0d1117; stroke: #3d444d; }
+  .ink   { fill: #f0f6fc; }
+  .muted { fill: #9198a1; }
+  .halo  { stroke: #0d1117; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow { animation: none; }
+}
+
+.box-blue  { fill: #3b82f6; fill-opacity: .12; stroke: #3b82f6; stroke-width: 2; }
+.glow-blue { fill: #3b82f6; fill-opacity: .30; stroke: #3b82f6; stroke-width: 4; opacity: 0; }
+.edge-blue { stroke: #3b82f6; }
+.fill-blue { fill: #3b82f6; }
+.box-green  { fill: #16a34a; fill-opacity: .12; stroke: #16a34a; stroke-width: 2; }
+.glow-green { fill: #16a34a; fill-opacity: .30; stroke: #16a34a; stroke-width: 4; opacity: 0; }
+.edge-green { stroke: #16a34a; }
+.fill-green { fill: #16a34a; }
+.box-amber  { fill: #d97706; fill-opacity: .12; stroke: #d97706; stroke-width: 2; }
+.glow-amber { fill: #d97706; fill-opacity: .30; stroke: #d97706; stroke-width: 4; opacity: 0; }
+.edge-amber { stroke: #d97706; }
+.fill-amber { fill: #d97706; }
+.box-red  { fill: #dc2626; fill-opacity: .12; stroke: #dc2626; stroke-width: 2; }
+.glow-red { fill: #dc2626; fill-opacity: .30; stroke: #dc2626; stroke-width: 4; opacity: 0; }
+.edge-red { stroke: #dc2626; }
+.fill-red { fill: #dc2626; }
+.box-purple  { fill: #8b5cf6; fill-opacity: .12; stroke: #8b5cf6; stroke-width: 2; }
+.glow-purple { fill: #8b5cf6; fill-opacity: .30; stroke: #8b5cf6; stroke-width: 4; opacity: 0; }
+.edge-purple { stroke: #8b5cf6; }
+.fill-purple { fill: #8b5cf6; }
+.box-slate  { fill: #64748b; fill-opacity: .12; stroke: #64748b; stroke-width: 2; }
+.glow-slate { fill: #64748b; fill-opacity: .30; stroke: #64748b; stroke-width: 4; opacity: 0; }
+.edge-slate { stroke: #64748b; }
+.fill-slate { fill: #64748b; }
+@keyframes glow0 { 0.0% { opacity: 0; } 0.01% { opacity: 0; } 0.02% { opacity: 1; } 11.32% { opacity: 1; } 14.47% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow0 { animation: glow0 7.95s linear infinite; }
+@keyframes glow1 { 0.0% { opacity: 0; } 19.72% { opacity: 0; } 22.87% { opacity: 1; } 34.19% { opacity: 1; } 37.33% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow1 { animation: glow1 7.95s linear infinite; }
+@keyframes glow2 { 0.0% { opacity: 0; } 42.59% { opacity: 0; } 45.73% { opacity: 1; } 57.05% { opacity: 1; } 60.2% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow2 { animation: glow2 7.95s linear infinite; }
+@keyframes glow3 { 0.0% { opacity: 0; } 65.46% { opacity: 0; } 68.6% { opacity: 1; } 79.92% { opacity: 1; } 83.07% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow3 { animation: glow3 7.95s linear infinite; }</style>
+<defs><marker id="head-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-blue" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-blue-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-blue" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-green" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-green-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-green" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-amber" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-amber-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-amber" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-red" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-red" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-red-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-red" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-purple" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-purple" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-purple-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-purple" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-slate" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-slate" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-slate-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-slate" d="M10,0 L0,5 L10,10 z"/></marker></defs>
+<rect class="bg" x="1" y="1" width="958" height="168" rx="14"/>
+<rect class="box-blue" x="24.0" y="50" width="196" height="80" rx="12"/>
+<rect class="box-purple" x="262.7" y="50" width="196" height="80" rx="12"/>
+<path class="edge edge-slate flow" d="M225.0,90.0 L256.7,90.0" marker-end="url(#head-slate)"/>
+<rect class="box-amber" x="501.3" y="50" width="196" height="80" rx="12"/>
+<path class="edge edge-slate flow" d="M463.7,90.0 L495.3,90.0" marker-end="url(#head-slate)"/>
+<rect class="box-green" x="740.0" y="50" width="196" height="80" rx="12"/>
+<path class="edge edge-slate flow" d="M702.3,90.0 L734.0,90.0" marker-end="url(#head-slate)"/>
+<path class="edge edge-slate" stroke-opacity=".35" d="M122.0,152 L838.0,152"/>
+<rect class="glow-blue glow0" x="24.0" y="50" width="196" height="80" rx="12"/>
+<rect class="glow-purple glow1" x="262.7" y="50" width="196" height="80" rx="12"/>
+<rect class="glow-amber glow2" x="501.3" y="50" width="196" height="80" rx="12"/>
+<rect class="glow-green glow3" x="740.0" y="50" width="196" height="80" rx="12"/>
+<g opacity="0"><circle class="fill-blue" r="13" fill-opacity=".25"/><circle class="fill-blue" r="7" stroke="#ffffff" stroke-width="2"/><animateMotion dur="7.95s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.11321;0.22869;0.3419;0.45733;0.57054;0.68602;0.79923;1" keyPoints="0.00000;0.00000;0.33338;0.33338;0.66662;0.66662;1.00000;1.00000;1.00000" path="M122.0,152 L360.7,152 L599.3,152 L838.0,152"/><animate attributeName="opacity" dur="7.95s" repeatCount="indefinite" keyTimes="0.00000;0.79923;0.81809;1.00000" values="1;1;0;0"/></g>
+<text class="title ink" x="122.0" y="87.0" text-anchor="middle">Enter AWS account ID</text>
+<text class="sub muted" x="122.0" y="105.0" text-anchor="middle">portal builds a template</text>
+<circle class="fill-blue" cx="24.0" cy="50" r="11"/>
+<text x="24.0" y="54.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">1</text>
+<text class="title ink" x="360.7" y="87.0" text-anchor="middle">Deploy the template</text>
+<text class="sub muted" x="360.7" y="105.0" text-anchor="middle">trail, bucket, read-only role</text>
+<circle class="fill-purple" cx="262.7" cy="50" r="11"/>
+<text x="262.7" y="54.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">2</text>
+<text class="title ink" x="599.3" y="87.0" text-anchor="middle">Connect GitHub</text>
+<text class="sub muted" x="599.3" y="105.0" text-anchor="middle">repository + access token</text>
+<circle class="fill-amber" cx="501.3" cy="50" r="11"/>
+<text x="501.3" y="54.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">3</text>
+<text class="title ink" x="838.0" y="87.0" text-anchor="middle">You are live</text>
+<text class="sub muted" x="838.0" y="105.0" text-anchor="middle">picked up by the next run</text>
+<circle class="fill-green" cx="740.0" cy="50" r="11"/>
+<text x="740.0" y="54.5" text-anchor="middle" font-size="12" font-weight="700" fill="#ffffff">4</text>
+</svg>

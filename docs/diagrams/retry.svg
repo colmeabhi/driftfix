@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" width="960" height="320" role="img" aria-label="When cfn-lint rejects the model's template, the Validator sends it back with the errors and the model corrects it. The second attempt passes and goes on to the PR Creator.">
+<title>When cfn-lint rejects the model's template, the Validator sends it back with the errors and the model corrects it. The second attempt passes and goes on to the PR Creator.</title>
+<style>
+svg { font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+.bg     { fill: #ffffff; stroke: #d1d9e0; }
+.ink    { fill: #1f2328; }
+.muted  { fill: #59636e; }
+.halo   { paint-order: stroke; stroke: #ffffff; stroke-width: 5px; stroke-linejoin: round; }
+.region { fill: #64748b; fill-opacity: .05; stroke: #8c959f; stroke-width: 1.5; stroke-dasharray: 3 5; }
+.mono   { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.title  { font-size: 14px; font-weight: 600; }
+.sub    { font-size: 12px; }
+.label  { font-size: 12px; }
+.badge  { font-size: 13px; font-weight: 600; }
+.edge   { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.flow   { stroke-dasharray: 6 7; animation: march 1s linear infinite; }
+@keyframes march { to { stroke-dashoffset: -13; } }
+@media (prefers-color-scheme: dark) {
+  .bg    { fill: #0d1117; stroke: #3d444d; }
+  .ink   { fill: #f0f6fc; }
+  .muted { fill: #9198a1; }
+  .halo  { stroke: #0d1117; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow { animation: none; }
+}
+
+.box-blue  { fill: #3b82f6; fill-opacity: .12; stroke: #3b82f6; stroke-width: 2; }
+.glow-blue { fill: #3b82f6; fill-opacity: .30; stroke: #3b82f6; stroke-width: 4; opacity: 0; }
+.edge-blue { stroke: #3b82f6; }
+.fill-blue { fill: #3b82f6; }
+.box-green  { fill: #16a34a; fill-opacity: .12; stroke: #16a34a; stroke-width: 2; }
+.glow-green { fill: #16a34a; fill-opacity: .30; stroke: #16a34a; stroke-width: 4; opacity: 0; }
+.edge-green { stroke: #16a34a; }
+.fill-green { fill: #16a34a; }
+.box-amber  { fill: #d97706; fill-opacity: .12; stroke: #d97706; stroke-width: 2; }
+.glow-amber { fill: #d97706; fill-opacity: .30; stroke: #d97706; stroke-width: 4; opacity: 0; }
+.edge-amber { stroke: #d97706; }
+.fill-amber { fill: #d97706; }
+.box-red  { fill: #dc2626; fill-opacity: .12; stroke: #dc2626; stroke-width: 2; }
+.glow-red { fill: #dc2626; fill-opacity: .30; stroke: #dc2626; stroke-width: 4; opacity: 0; }
+.edge-red { stroke: #dc2626; }
+.fill-red { fill: #dc2626; }
+.box-purple  { fill: #8b5cf6; fill-opacity: .12; stroke: #8b5cf6; stroke-width: 2; }
+.glow-purple { fill: #8b5cf6; fill-opacity: .30; stroke: #8b5cf6; stroke-width: 4; opacity: 0; }
+.edge-purple { stroke: #8b5cf6; }
+.fill-purple { fill: #8b5cf6; }
+.box-slate  { fill: #64748b; fill-opacity: .12; stroke: #64748b; stroke-width: 2; }
+.glow-slate { fill: #64748b; fill-opacity: .30; stroke: #64748b; stroke-width: 4; opacity: 0; }
+.edge-slate { stroke: #64748b; }
+.fill-slate { fill: #64748b; }
+@keyframes glow0 { 0.0% { opacity: 0; } 0.01% { opacity: 0; } 0.02% { opacity: 1; } 2.61% { opacity: 1; } 4.24% { opacity: 0; } 39.24% { opacity: 0; } 40.87% { opacity: 1; } 43.48% { opacity: 1; } 45.11% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow0 { animation: glow0 15.32s linear infinite; }
+@keyframes glow1 { 0.0% { opacity: 0; } 4.24% { opacity: 0; } 5.87% { opacity: 1; } 11.1% { opacity: 1; } 12.73% { opacity: 0; } 45.11% { opacity: 0; } 46.75% { opacity: 1; } 51.97% { opacity: 1; } 53.6% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow1 { animation: glow1 15.32s linear infinite; }
+@keyframes glow2 { 0.0% { opacity: 0; } 22.72% { opacity: 0; } 24.35% { opacity: 1; } 32.84% { opacity: 1; } 34.47% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow2 { animation: glow2 15.32s linear infinite; }
+@keyframes glow3 { 0.0% { opacity: 0; } 63.59% { opacity: 0; } 65.22% { opacity: 1; } 73.71% { opacity: 1; } 75.34% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow3 { animation: glow3 15.32s linear infinite; }
+@keyframes glow4 { 0.0% { opacity: 0; } 80.11% { opacity: 0; } 81.74% { opacity: 1; } 89.58% { opacity: 1; } 91.21% { opacity: 0; } 100.0% { opacity: 0; } }
+.glow4 { animation: glow4 15.32s linear infinite; }
+@keyframes show0 { 0.0% { opacity: 0; } 22.72% { opacity: 0; } 24.35% { opacity: 1; } 32.84% { opacity: 1; } 34.47% { opacity: 0; } 100.0% { opacity: 0; } }
+.show0 { opacity: 0; animation: show0 15.32s linear infinite; }
+@keyframes show1 { 0.0% { opacity: 0; } 63.59% { opacity: 0; } 65.22% { opacity: 1; } 73.71% { opacity: 1; } 75.34% { opacity: 0; } 100.0% { opacity: 0; } }
+.show1 { opacity: 0; animation: show1 15.32s linear infinite; }</style>
+<defs><marker id="head-blue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-blue" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-blue-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-blue" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-green" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-green" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-green-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-green" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-amber" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-amber-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-amber" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-red" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-red" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-red-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-red" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-purple" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-purple" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-purple-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-purple" d="M10,0 L0,5 L10,10 z"/></marker><marker id="head-slate" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-slate" d="M0,0 L10,5 L0,10 z"/></marker><marker id="head-slate-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="fill-slate" d="M10,0 L0,5 L10,10 z"/></marker></defs>
+<rect class="bg" x="1" y="1" width="958" height="318" rx="14"/>
+<rect class="box-purple" x="60" y="40" width="200" height="64" rx="12"/>
+<rect class="box-blue" x="60" y="170" width="200" height="64" rx="12"/>
+<rect class="box-amber" x="380" y="170" width="200" height="64" rx="12"/>
+<rect class="box-green" x="700" y="170" width="200" height="64" rx="12"/>
+<path class="edge edge-slate flow" d="M160,164 L160,110" marker-end="url(#head-slate)" marker-start="url(#head-slate-back)"/>
+<path class="edge edge-slate flow" d="M266,188 L374,188" marker-end="url(#head-slate)"/>
+<path class="edge edge-red flow" d="M374,216 L266,216" marker-end="url(#head-red)"/>
+<path class="edge edge-green flow" d="M586,202 L694,202" marker-end="url(#head-green)"/>
+<rect class="glow-blue glow0" x="60" y="170" width="200" height="64" rx="12"/>
+<rect class="glow-purple glow1" x="60" y="40" width="200" height="64" rx="12"/>
+<rect class="glow-red glow2" x="380" y="170" width="200" height="64" rx="12"/>
+<rect class="glow-green glow3" x="380" y="170" width="200" height="64" rx="12"/>
+<rect class="glow-green glow4" x="700" y="170" width="200" height="64" rx="12"/>
+<g opacity="0"><circle class="fill-blue" r="13" fill-opacity=".25"/><circle class="fill-blue" r="7" stroke="#ffffff" stroke-width="2"/><animateMotion dur="15.32s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.02611;0.05875;0.11097;0.1436;0.16319;0.24352;0.32838;1" keyPoints="0.00000;0.00000;0.22414;0.22414;0.44828;0.44828;1.00000;1.00000;1.00000" path="M160.0,202.0 L160.0,72.0 L160.0,202.0 L480.0,202.0"/><animate attributeName="opacity" dur="15.32s" repeatCount="indefinite" keyTimes="0.00000;0.32838;0.33817;1.00000" values="1;1;0;0"/></g>
+<g opacity="0"><circle class="fill-red" r="13" fill-opacity=".25"/><circle class="fill-red" r="7" stroke="#ffffff" stroke-width="2"/><animateMotion dur="15.32s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.32838;0.40872;0.43483;0.46746;0.51968;0.55232;0.5719;0.65224;0.7371;1" keyPoints="0.00000;0.00000;0.35556;0.35556;0.50000;0.50000;0.64444;0.64444;1.00000;1.00000;1.00000" path="M480.0,202.0 L160.0,202.0 L160.0,72.0 L160.0,202.0 L480.0,202.0"/><animate attributeName="opacity" dur="15.32s" repeatCount="indefinite" keyTimes="0.00000;0.31859;0.33817;0.73710;0.74689;1.00000" values="0;0;1;1;0;0"/></g>
+<g opacity="0"><circle class="fill-green" r="13" fill-opacity=".25"/><circle class="fill-green" r="7" stroke="#ffffff" stroke-width="2"/><animateMotion dur="15.32s" repeatCount="indefinite" calcMode="linear" keyTimes="0;0.7371;0.81743;0.89576;1" keyPoints="0.00000;0.00000;1.00000;1.00000;1.00000" path="M480.0,202.0 L800.0,202.0"/><animate attributeName="opacity" dur="15.32s" repeatCount="indefinite" keyTimes="0.00000;0.72730;0.74689;0.89576;0.90555;1.00000" values="0;0;1;1;0;0"/></g>
+<text class="title ink" x="160.0" y="69.0" text-anchor="middle">Amazon Bedrock</text>
+<text class="sub muted" x="160.0" y="87.0" text-anchor="middle">writes the template</text>
+<text class="title ink" x="160.0" y="199.0" text-anchor="middle">Stack Processor</text>
+<text class="sub muted" x="160.0" y="217.0" text-anchor="middle">asks the model</text>
+<text class="title ink" x="480.0" y="199.0" text-anchor="middle">Validator</text>
+<text class="sub muted" x="480.0" y="217.0" text-anchor="middle">runs cfn-lint</text>
+<text class="title ink" x="800.0" y="199.0" text-anchor="middle">PR Creator</text>
+<text class="sub muted" x="800.0" y="217.0" text-anchor="middle">opens the pull request</text>
+<text class="label muted halo" x="320" y="178" text-anchor="middle">template</text>
+<text class="label muted halo" x="320" y="236" text-anchor="middle">lint errors</text>
+<text class="label muted halo" x="640" y="192" text-anchor="middle">passes</text>
+<text class="label muted" x="480" y="300" text-anchor="middle">At most 3 retries. After that the events are marked failed and an alarm fires.</text>
+<g class="show0"><rect class="fill-red" x="400" y="252" width="160" height="28" rx="14"/><text class="badge" x="480" y="271" text-anchor="middle" fill="#ffffff">attempt 1: 2 errors</text></g>
+<g class="show1"><rect class="fill-green" x="400" y="252" width="160" height="28" rx="14"/><text class="badge" x="480" y="271" text-anchor="middle" fill="#ffffff">attempt 2: clean</text></g>
+</svg>
