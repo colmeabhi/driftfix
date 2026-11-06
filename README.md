@@ -1,218 +1,374 @@
-# IaC Drift Reconciliation SaaS
+# driftfix
 
-Automatically detects when manual AWS console changes cause infrastructure drift, generates corrected CloudFormation templates using an LLM, and opens GitHub pull requests for engineers to review and merge.
+**Someone changed your AWS infrastructure by hand. driftfix notices, works out what the code should now say, and opens a pull request with the fix.**
 
-When an engineer makes an out-of-band change in the AWS Console — modifying a security group, resizing an instance, updating a bucket policy — that change is not reflected in the CloudFormation template that originally created the resource. This system detects the gap daily, generates an updated template that reflects the change, and proposes it as a pull request, keeping declared state and actual state in sync.
+It watches CloudTrail for manual changes to resources that CloudFormation manages, asks an LLM to update the template to match, checks the result with cfn-lint, and proposes it on GitHub for an engineer to review.
+
+> Also known as the *IaC Drift Reconciliation SaaS*. Built as a team project by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan Machado.
 
 ---
 
-## High-Level Deployment
+## The problem: your code and your cloud stop agreeing
 
-The system spans two AWS accounts and a hosted customer portal.
+Infrastructure as Code makes one promise: the template in Git describes what is running. That promise breaks the first time someone fixes something in the AWS Console.
 
-### SaaS Pipeline
+Picture a production incident. An engineer opens a port on a security group, or bumps an instance from `t3.large` to `t3.xlarge`, straight in the console because it is the fastest way. The incident ends. Nobody updates the template.
 
-Deployed via `terraform/saas/`. The pipeline runs on a daily EventBridge schedule:
-
-```
-EventBridge (7 AM UTC)
-    └── Orchestrator Lambda
-            ├── Reads the last 72h of CloudTrail logs from each customer's S3 bucket (cross-account)
-            ├── Keeps successful manual writes (CloudFormation's own deploys are ignored)
-            ├── Deduplicates events against DynamoDB; failed or stuck events are retried (max 3 attempts)
-            ├── Groups changes by CloudFormation stack
-            └── Fans out one Stack Processor Lambda per affected stack (parallel)
-                    └── Stack Processor
-                            ├── Sends the template and its parameter files to Amazon Bedrock
-                            ├── No change proposed → records `no_change`, opens no PR
-                            └── Validator Lambda
-                                    ├── Runs cfn-lint; on errors sends the stack back to the
-                                    │   Stack Processor with the errors (up to 3 retries)
-                                    └── PR Creator Lambda
-                                            ├── Commits the changed files to a GitHub branch
-                                            └── Opens a pull request with the model's explanation,
-                                                marked "needs review" when the model asked for
-                                                manual review or its confidence is below 0.6
+```mermaid
+flowchart LR
+    subgraph before["Monday: in sync"]
+        direction TB
+        T1["template.yaml<br/>InstanceType: t3.large"]
+        A1["Running in AWS<br/>t3.large"]
+        T1 -.-|same| A1
+    end
+    subgraph after["Tuesday: drifted"]
+        direction TB
+        T2["template.yaml<br/>InstanceType: t3.large"]
+        A2["Running in AWS<br/>t3.xlarge"]
+        T2 -.-|different| A2
+    end
+    before -->|"manual console change"| after
 ```
 
-Every CloudTrail event has a record in the reconciliations table that moves through
-`queued` → `pr_opened`, `no_change` or `failed`. The lifecycle is defined in
-[`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py).
+This gap is called **drift**, and it is quiet until it hurts. The next deploy from Git silently shrinks the instance back to `t3.large`, and the incident returns.
 
-A **Health Check Lambda** runs every 5 minutes independently, probing all pipeline components and publishing custom `drift-detector/HealthCheck` metrics to CloudWatch.
+AWS can tell you that a stack has drifted. It does not write the fix. That is the part driftfix automates.
 
-### Customer Portal
+## What driftfix does about it
 
-A self-service onboarding portal for new customers. Built as a containerized FastAPI + React app:
+Once a day, for every customer, it runs three steps:
 
-- Source: `admin_ui/app.py` (backend) + `ui/customer-portal/` (frontend)
-- Built with Docker (`Dockerfile`) and pushed to Amazon ECR
-- Deployed on **AWS App Runner** — no servers to manage, scales automatically
-- Live URL: `https://fxcbu33sqc.us-east-1.awsapprunner.com/portal/`
+1. **Detect.** Read the customer's CloudTrail logs and pick out the manual changes to CloudFormation-managed resources.
+2. **Fix.** Give the template and the evidence to an LLM on Amazon Bedrock, and get back an updated template.
+3. **Propose.** Lint the result, then open a pull request that explains what changed and why.
 
-Customers use the portal to generate a CloudFormation template, deploy it in their own AWS account, and connect their GitHub repository. The portal handles tenant registration automatically.
+A human always makes the final call. driftfix never changes infrastructure and never merges anything; it only opens pull requests.
 
-### Customer-Side Infrastructure
+```mermaid
+flowchart LR
+    C["Engineer changes<br/>a resource by hand"] --> CT["CloudTrail<br/>records it"]
+    CT --> D["driftfix<br/>daily run"]
+    D --> L["LLM updates<br/>the template"]
+    L --> V["cfn-lint<br/>checks it"]
+    V --> PR["Pull request<br/>on GitHub"]
+    PR --> H["Engineer reviews<br/>and merges"]
+```
 
-Each customer deploys `terraform/customer/` in their own AWS account, which creates:
+### What the pull request looks like
 
-- A **CloudTrail trail** logging all API calls to an S3 bucket
-- An **S3 bucket** storing CloudTrail log files
-- A **cross-account IAM role** allowing the SaaS account to read logs and CloudFormation templates via STS `AssumeRole`
+For the resize above, the engineer who owns the stack finds this in their repository the next morning:
 
----
+> **[Drift] ModifyInstanceAttribute detected on web**
+>
+> | Field | Value |
+> |---|---|
+> | Stack | `web` |
+> | Event | `ModifyInstanceAttribute` |
+> | Time | 2026-01-10T07:00:00Z |
+> | Actor | `arn:aws:iam::111111111111:user/alice` |
+> | Model confidence | 82% |
+>
+> **What changed** — Instance resized to t3.xlarge.
+>
+> **Root cause** — Manual resize in the console.
+>
+> **Files updated:** `stacks/web/prod.json`
 
-## Cloud Services Used
-
-| Service | Role |
-|---|---|
-| **AWS Lambda** | Five pipeline functions: orchestrator, stack_processor, validator, pr_creator, health_check |
-| **Amazon DynamoDB** | `drift-detector-tenants` (customer config) and `drift-detector-reconciliations` (event audit trail) |
-| **Amazon S3** | CloudTrail log storage (customer account) and validated template storage (SaaS account) |
-| **AWS CloudTrail** | Source of truth — logs every AWS API call in the customer account |
-| **Amazon Bedrock (Nova Lite)** | LLM that generates updated CloudFormation templates from CloudTrail events |
-| **AWS EventBridge** | Daily cron trigger (`cron(0 7 * * ? *)`) for the batch pipeline |
-| **AWS SQS** | Dead-letter queue for failed Lambda invocations — triggers a CloudWatch alarm when non-empty |
-| **Amazon CloudWatch** | Dashboards, alarms, metric filters, log groups, and custom health metrics |
-| **AWS SNS** | Alarm notifications for pipeline failures and DLQ events |
-| **AWS Secrets Manager** | Stores GitHub personal access tokens for PR creation |
-| **AWS STS** | Cross-account role assumption — gives time-limited credentials scoped to each customer account |
-| **AWS IAM** | Cross-account trust policies, Lambda execution roles, least-privilege access |
-| **AWS App Runner** | Hosts the customer portal container — managed, auto-scaling, no cluster to configure |
-| **Amazon ECR** | Docker image registry for the customer portal container |
-| **AWS CloudFormation** | The customer IaC stacks being monitored for drift |
-
----
-
-## Observability
-
-All observability infrastructure is defined in `terraform/saas/monitoring.tf` and `terraform/saas/health_check.tf`. Full details in [`docs/observability.md`](docs/observability.md).
-
-### Health Check Lambda
-
-`lambdas/health_check/` runs on a 5-minute EventBridge schedule. It probes all pipeline components (DynamoDB, SQS, S3, Secrets Manager, Lambda) and publishes a custom `drift-detector/HealthCheck` metric per component. A value of `1` means healthy; `0` triggers an alarm.
-
-### Public CloudWatch Dashboards
-
-Three dashboards are publicly accessible without AWS credentials:
-
-| Dashboard | Purpose |
-|---|---|
-| `drift-detector-status` | Live component health alarm board — recommended entry point for reviewers |
-| `drift-detector-overview` | Lambda invocations, errors, duration p99/p95, throttles, cold starts, concurrency |
-| `drift-detector-cost` | Lambda compute cost estimate; automatically reflects the selected time window |
-
-### Alarms
-
-- **8 health check alarms** — one per infrastructure component; fire when the `HealthCheck` metric drops to 0
-- **9 pipeline alarms** — cover Lambda errors, throttles, timeouts, and DLQ depth
-- All alarms notify via SNS; DLQ depth alarm fires when any message lands in the queue
+Merging it brings Git back in line with reality. If the change was a mistake, closing the pull request and redeploying undoes the drift instead. Either way the gap is now visible.
 
 ---
 
-## How Scaling and Failure Demonstrations Were Performed
+## How it works
 
-Five structured load test scenarios were run against a live customer AWS account with 10 pre-deployed CloudFormation stacks on 2026-05-04. Three dedicated failure scenarios were run separately using the scripts in `tests/failure_scenarios/`. Full load test results are in [`results/report.md`](results/report.md).
+### Two AWS accounts, one narrow bridge
 
-### Drift Induction
+driftfix is multi-tenant. It runs in its own AWS account and reaches into each customer's account through a single read-only IAM role.
 
-Drift was induced using [`scripts/load_test/run_load_test.sh`](scripts/load_test/run_load_test.sh), which applies out-of-band AWS API changes directly to customer CloudFormation stacks (e.g. `PutBucketEncryption`, `ModifyDBInstance`). CloudTrail captures these changes within ~60 seconds. Between scenarios, `reset-stacks.sh` destroys and redeploys all test stacks to a clean state.
+```mermaid
+flowchart LR
+    subgraph cust["Customer AWS account"]
+        direction TB
+        STK["CloudFormation stacks"]
+        TRAIL["CloudTrail trail"]
+        LOGS[("S3 bucket<br/>CloudTrail logs")]
+        STK -->|"every API call"| TRAIL --> LOGS
+    end
 
-The Orchestrator Lambda was invoked manually to trigger the pipeline immediately, mimicking the daily EventBridge schedule.
+    subgraph saas["driftfix AWS account"]
+        direction TB
+        EB["EventBridge<br/>daily, 7 AM UTC"]
+        ORC["1. Orchestrator"]
+        SP["2. Stack Processor"]
+        VAL["3. Validator"]
+        PRC["4. PR Creator"]
+        BR["Amazon Bedrock"]
+        DDB[("DynamoDB<br/>tenants + event records")]
+        EB --> ORC --> SP --> VAL --> PRC
+        SP <-->|"rewrite template"| BR
+        ORC <-->|"dedup"| DDB
+    end
 
-### Load Test Scenarios
+    GH["Customer's<br/>GitHub repo"]
 
-| Scenario | Stacks | Purpose |
+    LOGS ==>|"read through a<br/>read-only role"| ORC
+    PRC ==>|"open pull request"| GH
+```
+
+Three things keep customers isolated from each other:
+
+- **Temporary credentials.** Each run calls STS `AssumeRole` and gets credentials that last one hour and work in exactly one customer account.
+- **An ExternalId per customer.** The role can only be assumed with a secret value generated at onboarding, which blocks one customer from pointing driftfix at another's account.
+- **Secrets stay in Secrets Manager.** GitHub tokens are fetched at runtime and never written to logs or to the tenants table.
+
+### The pipeline, stage by stage
+
+The work is split across four small Lambda functions. Each does one job and hands off to the next.
+
+| Stage | Its job | The details that matter |
 |---|---|---|
-| T1 — Functional | 1 | Verify the full end-to-end pipeline for a single stack |
-| T2 — Scaling | 3 | Confirm Lambda scales horizontally with parallel stacks |
-| T3 — Performance | 10 | Measure P95/P99 latency and throughput at peak load |
-| T4 — Failure | 10 + 1 bad tenant | Verify failure isolation — bad tenant must not block valid stacks |
-| T5 — Security | 6 | Audit CloudWatch logs for credential or secret leakage |
+| **1. Orchestrator** | Find the manual changes | Reads the last 72 hours of CloudTrail logs. Keeps successful write calls only. Ignores changes made by CloudFormation itself, so a normal deploy is not mistaken for drift. Uses the `aws:cloudformation:stack-name` tag to work out which stack owns each resource. |
+| **2. Stack Processor** | Write the fix | Fetches the template from GitHub together with the parameter files next to it, and sends them to Bedrock with the CloudTrail events. One invocation per stack, all in parallel. |
+| **3. Validator** | Check the fix | Runs cfn-lint. If the template has errors, sends it back to the Stack Processor with the error list so the model can correct itself. |
+| **4. PR Creator** | Propose the fix | Commits every changed file in one atomic commit on a `drift/...` branch and opens the pull request. |
 
-### Scaling Behavior
+Why parameter files? Because the value that drifted often does not live in the template. If `template.yaml` says `InstanceType: !Ref Size` and `prod.json` says `Size = t3.large`, the correct fix is one line in `prod.json`. Hard-coding `t3.xlarge` into the template would break every other environment. The model sees both files and returns only the ones it changed.
 
-Lambda concurrency scaled exactly 1:1 with the number of drifted stacks in every scenario — from 1 concurrent execution (T1) to 10 (T3) — with zero throttles and no manual provisioning. Throughput grew from ~16 stacks/min at 1 stack to ~39.5 stacks/min at 10 stacks (2.5× gain for 10× load).
+### When the model gets it wrong
 
-The sole bottleneck under load is **Amazon Bedrock tail latency**: P50 median stayed stable at 4–5 s regardless of load, but P99 grew from 1.7 s (1 stack) to 14.9 s (10 stacks) as parallel Bedrock requests competed for inference capacity. Lambda errors and throttles were zero across all runs.
+LLMs sometimes produce a template that is not valid CloudFormation. driftfix treats that as a normal case, not a crash:
 
-### Failure Isolation (T4)
+```mermaid
+sequenceDiagram
+    participant SP as Stack Processor
+    participant B as Bedrock
+    participant V as Validator
+    participant PR as PR Creator
 
-A tenant record with an invalid IAM role ARN was injected into DynamoDB. The Orchestrator rejected it at the processor stage — the bad tenant was logged as an error and not forwarded to any stack processor. All 10 valid stacks completed normally with zero errors.
+    SP->>B: template + CloudTrail events
+    B-->>SP: updated template
+    SP->>V: validate this
+    V->>V: cfn-lint finds errors
+    V->>SP: try again, here are the errors
+    SP->>B: template + events + your last answer + its errors
+    B-->>SP: corrected template
+    SP->>V: validate this
+    V->>V: cfn-lint passes
+    V->>PR: open the pull request
+```
 
-### Security Audit (T5)
+The loop runs at most three times. After that the events are marked `failed`, the invocation lands in the dead-letter queue, and an alarm fires. Only cfn-lint **errors** block a template; warnings are logged, because hand-written templates are full of warnings the model did not cause.
 
-CloudWatch Logs were audited for patterns: `AKIA`, `ghp_`, `password`, `secret_key`, `aws_secret`. None were found across any Lambda log group. All secrets are stored in AWS Secrets Manager and fetched at runtime — never logged.
+### How sure is the model?
 
-### Dedicated Failure Scenarios
+Along with the template, the model returns a summary, a root cause, a confidence score between 0 and 1, and a flag saying whether a human should look closely. driftfix acts on that verdict:
 
-Three targeted failure scenarios were run using scripts in [`tests/failure_scenarios/`](tests/failure_scenarios/). Each directly invokes the Validator Lambda and emulates async retry and DLQ behavior. Full documentation in [`tests/failure_scenarios/README.md`](tests/failure_scenarios/README.md).
-
-**Scenario 1 — Poison Pill** (`scenario_1_poison_pill.py`)
-
-A CloudFormation template with 4 deliberate cfn-lint violations is delivered to the Validator. The validator fails on each of 3 attempts, then a `RetriesExhausted` message is routed to the SQS DLQ — matching Lambda's on-failure async destination behavior.
-
-- Primary signal: Lambda/Errors spike of 3 on `drift-detector-validator`
-- DLQ depth: 1 message after retries exhausted
-- Alarm: `drift-detector-validator-errors` transitions to ALARM
-
-**Scenario 2 — Concurrency Throttle** (`scenario_2_throttle.py`)
-
-40 concurrent Validator invocations are fired against a 10-concurrency account limit. ~30 are immediately rejected with `TooManyRequestsException`. Retry waves with exponential backoff exhaust remaining attempts, routing ~10 events to the DLQ.
-
-- Primary signal: Lambda/Throttles spike ~30; Invocations < 40 (throttled requests never execute)
-- DLQ depth: ~10 messages
-- Alarm: `drift-detector-validator-throttled` transitions to ALARM
-
-**Scenario 3 — AZ Resilience** (`scenario_3_az_resilience.py`)
-
-Simulates compute degradation from a single-AZ failure by temporarily reducing Validator Lambda memory from 256 MB to 224 MB (Lambda vCPU is proportional to memory), slowing cfn-lint execution. Settings are restored automatically by the script's `finally` block.
-
-- Primary signal: Duration p99 elevated during degradation window
-- Lambda/Errors: 0 throughout (no application failures, only slowdown)
-- DLQ: none
-
-**Summary:**
-
-| Scenario | Failure Type | Primary Signal | DLQ? |
-|---|---|---|---|
-| 1 — Poison Pill | Application error (cfn-lint violations) | Lambda/Errors ×3 | Yes — 1 message |
-| 2 — Throttle | Resource exhaustion (concurrency limit) | Lambda/Throttles ~30 | Yes — ~10 messages |
-| 3 — AZ Degradation | Infrastructure slowdown | Duration p99 elevated, Errors = 0 | No |
-
-### Performance Graphs
-
-Generated by [`scripts/load_test/graphs_from_csv.py`](scripts/load_test/graphs_from_csv.py) from CloudWatch metric exports. Charts are in [`results/`](results/).
-
-| Graph | Shows |
+| The model says | What driftfix does |
 |---|---|
-| G1 — Bedrock Latency | P50/P95/P99 Bedrock response time per scenario |
-| G2 — Latency Timeline | P50 vs P99 divergence across scenarios |
-| G3 — Throughput | Stacks processed per minute per scenario |
-| G4 — Concurrency | Peak Lambda concurrent executions per scenario |
-| G5 — Error Rate | Errors and DLQ messages per scenario |
-| G6 — Scaling Response | Bedrock latency vs concurrent stack count |
-| G7 — Resource Utilization | Lambda invocations and duration per pipeline stage |
+| "Here is the change", confidence 0.6 or higher | Opens a normal pull request, with the model's explanation in the description |
+| "Here is the change, but check it", or confidence below 0.6 | Opens a pull request titled **`[Drift – needs review]`** with a warning banner listing the reasons |
+| "The evidence is not enough to change anything" | Opens **no** pull request and records the reason |
+
+The threshold is the `REVIEW_CONFIDENCE_THRESHOLD` environment variable on the Stack Processor.
+
+### No event gets lost
+
+Every CloudTrail event has a record in DynamoDB that tracks where it is in the pipeline:
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: Orchestrator picks it up
+    queued --> pr_opened: pull request created
+    queued --> no_change: model found nothing to change
+    queued --> failed: a stage reported an error
+    queued --> queued: stuck over 2 hours, retried next run
+    failed --> queued: retried next run, max 3 attempts
+    pr_opened --> [*]
+    no_change --> [*]
+```
+
+This record is what makes the daily run safe to repeat. Finished events are skipped, so a pull request is never opened twice. Failed events are picked up again the next day, up to three attempts, which is why the lookback window is 72 hours and not 24. The rules live in one small file, [`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py).
+
+For the full walkthrough of every step, see [`docs/system-architecture.md`](docs/system-architecture.md).
+
+---
+
+## Onboarding a customer
+
+Customers sign themselves up through a small web portal, a React front end served by a FastAPI backend ([`ui/customer-portal/`](ui/customer-portal/), [`admin_ui/app.py`](admin_ui/app.py)).
+
+```mermaid
+flowchart LR
+    S1["1. Enter your<br/>AWS account ID"] --> S2["2. Deploy the generated<br/>CloudFormation template"]
+    S2 --> S3["3. Connect your<br/>GitHub repo"]
+    S3 --> S4["Done: included in<br/>the next daily run"]
+```
+
+The template from step 2 creates everything driftfix needs in the customer's account: a CloudTrail trail that records write events, an S3 bucket for the logs, and the read-only cross-account role. The same resources are available as Terraform in [`terraform/customer/`](terraform/customer/).
+
+The portal is packaged with Docker, pushed to Amazon ECR and hosted on AWS App Runner. The course deployment ran at `https://fxcbu33sqc.us-east-1.awsapprunner.com/portal/`. The customer-facing guide is [`docs/customer-onboarding.md`](docs/customer-onboarding.md).
+
+---
+
+## What it is built with
+
+| Service | What it does here |
+|---|---|
+| **AWS Lambda** | The four pipeline functions plus a health check |
+| **Amazon Bedrock** (Nova Lite by default) | The LLM that rewrites templates from CloudTrail evidence |
+| **AWS CloudTrail** | The source of truth: a log of every API call in the customer's account |
+| **Amazon DynamoDB** | `drift-detector-tenants` holds customer config; `drift-detector-reconciliations` holds one record per event |
+| **Amazon S3** | CloudTrail logs on the customer side; validated templates on the driftfix side |
+| **Amazon EventBridge** | The daily trigger, `cron(0 7 * * ? *)`, and the 5-minute health check schedule |
+| **Amazon SQS** | Dead-letter queue for failed invocations |
+| **Amazon CloudWatch + SNS** | Dashboards, alarms, metric filters, and alarm notifications |
+| **AWS Secrets Manager** | GitHub tokens |
+| **AWS STS + IAM** | Cross-account access with temporary credentials; one role per Lambda |
+| **AWS App Runner + Amazon ECR** | Hosting and image registry for the customer portal |
+| **Terraform** | All of the above, defined in [`terraform/`](terraform/) |
+
+---
+
+## Knowing when something breaks
+
+A pipeline that runs once a day can fail without anyone noticing, so a separate **Health Check Lambda** runs every 5 minutes. It probes each Lambda function, both DynamoDB tables, the audit bucket and the dead-letter queue, and publishes a `drift-detector/HealthCheck` metric for each: `1` is healthy, `0` raises an alarm.
+
+Three CloudWatch dashboards sit on top of that:
+
+| Dashboard | Use it to answer |
+|---|---|
+| `drift-detector-status` | Is everything up right now? The best place to start. |
+| `drift-detector-overview` | How is the pipeline performing? Invocations, errors, p95/p99 duration, throttles, cold starts, concurrency. |
+| `drift-detector-cost` | What is this costing? Lambda compute estimate for the selected time window. |
+
+There are 17 alarms in total: 8 for component health and 9 for pipeline behaviour (errors, throttles, timeouts, dead-letter queue depth). All of them notify through SNS. Details are in [`docs/observability.md`](docs/observability.md).
+
+---
+
+## How we tested it
+
+### Load tests
+
+On 2026-05-04 we ran five scenarios against a real customer account with 10 CloudFormation stacks. A script ([`scripts/load_test/run_load_test.sh`](scripts/load_test/run_load_test.sh)) caused real drift by calling AWS APIs directly, such as `PutBucketEncryption` and `ModifyDBInstance`, and then we triggered the Orchestrator by hand.
+
+| Scenario | Stacks | The question it answers |
+|---|---|---|
+| T1 — Functional | 1 | Does the whole pipeline work end to end? |
+| T2 — Scaling | 3 | Do stacks really run in parallel? |
+| T3 — Performance | 10 | How fast is it at peak load? |
+| T4 — Failure | 10 + 1 broken tenant | Does one bad customer block the others? |
+| T5 — Security | 6 | Do any secrets leak into the logs? |
+
+**It scales without tuning.** Lambda concurrency matched the number of drifted stacks exactly, from 1 to 10, with zero throttles and zero errors. Throughput rose from about 16 stacks per minute to about 39.5.
+
+![Throughput per scenario](results/G3_throughput.png)
+
+**The bottleneck is the LLM, not our code.** Median Bedrock latency held steady at 4–5 seconds at every load level. The slowest calls did not: P99 grew from 1.7 seconds with one stack to 14.9 seconds with ten, as parallel requests competed for inference capacity.
+
+![Bedrock latency against concurrent stacks](results/G6_scaling_response.png)
+
+**A broken tenant stays contained (T4).** We added a tenant with an invalid IAM role. The Orchestrator logged the error and moved on, and all 10 valid stacks finished normally.
+
+**Nothing sensitive is logged (T5).** We searched every Lambda log group for `AKIA`, `ghp_`, `password`, `secret_key` and `aws_secret` and found no matches.
+
+The full report, with all seven graphs and the raw CloudWatch exports, is in [`results/report.md`](results/report.md).
+
+### Breaking it on purpose
+
+Three scripts in [`tests/failure_scenarios/`](tests/failure_scenarios/) each cause one kind of failure and check that the monitoring catches it.
+
+| Scenario | What we break | What we expect to see | Dead-letter queue |
+|---|---|---|---|
+| **1. Poison pill** | Send the Validator a template with four cfn-lint violations | 3 Lambda errors, `drift-detector-validator-errors` alarm | 1 message |
+| **2. Throttle** | Fire 40 invocations at a concurrency limit of 10 | About 30 throttles, `drift-detector-validator-throttled` alarm | About 10 messages |
+| **3. Degraded zone** | Cut the Validator's memory to slow it down, imitating a struggling availability zone | Slower p99 duration, but zero errors | None |
+
+Each scenario is written up in [`tests/failure_scenarios/README.md`](tests/failure_scenarios/README.md).
+
+### Unit tests
+
+The pipeline's decision logic has unit tests that need no AWS account:
+
+```bash
+pip install boto3 pytest
+```
+
+```bash
+pytest tests/unit
+```
+
+They cover which events count as drift, when an event is retried, how the model's reply is parsed, the lint retry loop, and what ends up in the pull request.
+
+---
+
+## Running it yourself
+
+You need an AWS account with Bedrock model access, Terraform 1.5 or newer, and an S3 bucket to hold the Lambda zip files.
+
+Package the Lambdas and upload them:
+
+```bash
+./scripts/package_lambdas.sh <your-lambda-zip-bucket>
+```
+
+Then copy `terraform/saas/terraform.tfvars.example` to `terraform.tfvars`, fill it in, and deploy:
+
+```bash
+cd terraform/saas && terraform init && terraform apply
+```
+
+The four pipeline Lambdas pass work to each other, so always deploy them together.
+
+---
+
+## What is not done yet
+
+This started as a course project, and some things are not production-ready:
+
+- **The portal has no login.** Anyone who can reach it can list, add and remove tenants. Put it behind authentication before exposing it.
+- **Templates that are not in GitHub.** If the template cannot be found in the customer's repository, driftfix falls back to the copy CloudFormation holds and proposes it as `template.yaml` at the repository root, which may not be where the customer keeps it.
+- **Tenants run one after another** inside a single 15-minute Orchestrator invocation, which caps how many customers one run can serve.
+- **No CI.** The unit tests are run by hand.
+
+---
+
+## Repository layout
+
+```
+.
+├── lambdas/
+│   ├── processor/          Orchestrator: reads CloudTrail, finds drift, fans out per stack
+│   ├── stack_processor/    Fetches the template, calls Bedrock, decides what to do with the answer
+│   ├── validator/          Runs cfn-lint and drives the retry loop
+│   ├── pr_creator/         Commits the changed files and opens the pull request
+│   ├── health_check/       Probes every component every 5 minutes
+│   └── shared/             Event status lifecycle, packaged into every Lambda
+├── admin_ui/               FastAPI backend for the customer portal
+├── ui/customer-portal/     React + Vite + Tailwind front end
+├── terraform/
+│   ├── saas/               driftfix's own infrastructure, dashboards and alarms
+│   └── customer/           What a customer deploys: CloudTrail, S3, cross-account role
+├── tests/
+│   ├── unit/               Unit tests, no AWS needed
+│   ├── e2e.py              End-to-end test against a deployed pipeline
+│   └── failure_scenarios/  The three break-it-on-purpose scripts
+├── scripts/
+│   ├── package_lambdas.sh  Builds and uploads the Lambda zips
+│   └── load_test/          Load test runner and graph generation
+├── results/                Load test report, graphs G1–G7, raw metric exports
+├── docs/                   Architecture, onboarding and observability guides
+├── Dockerfile              Portal image: React build + FastAPI
+└── .env.example
+```
 
 ---
 
 ## Team
 
-Built as a team project by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan Machado.
+Built by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan Machado.
 
-## Division of Work
-
-### Ethan Machado
-
-- Created the example customer repository, including the CI/CD pipeline and CloudFormation test stacks.
-- Created and executed the dedicated failure scenarios.
-- Created three CloudWatch dashboards for service status, operations overview, and cost visibility.
-- Implemented CloudWatch alarms and the SNS email notification topic.
-- Implemented recurring health checks for major pipeline components.
-- Implemented write-only management log filtering on the customer tenant side.
-- Created and collaborated on several presentation slides.
-- Presented the introduction, customer-side system demo, and failure scenario sections.
-- Helped write the Abstract, Problem Definition, Motivation, Related Work, Implementation Details, Failure Modeling, Architectural Trade-Off Analysis, and Conclusions sections of the final report.
+<details>
+<summary>Who did what</summary>
 
 ### Abhishek Naresh Ahirrao
 
@@ -232,51 +388,18 @@ Built as a team project by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan 
 - Collected, analyzed, and presented the performance metrics used in the report and presentation, including latency, throughput, concurrency, and resource utilization.
 - Experimented with and evaluated different Amazon Bedrock models for deployment suitability.
 - Configured the Bedrock integration in the Stack Processor Lambda for LLM-based CloudFormation template generation.
-- Helped write the above related compenents in report and presentation slides
+- Helped write the related components in the report and presentation slides.
 
----
+### Ethan Machado
 
-## Repository Structure
+- Created the example customer repository, including the CI/CD pipeline and CloudFormation test stacks.
+- Created and executed the dedicated failure scenarios.
+- Created three CloudWatch dashboards for service status, operations overview, and cost visibility.
+- Implemented CloudWatch alarms and the SNS email notification topic.
+- Implemented recurring health checks for major pipeline components.
+- Implemented write-only management log filtering on the customer tenant side.
+- Created and collaborated on several presentation slides.
+- Presented the introduction, customer-side system demo, and failure scenario sections.
+- Helped write the Abstract, Problem Definition, Motivation, Related Work, Implementation Details, Failure Modeling, Architectural Trade-Off Analysis, and Conclusions sections of the final report.
 
-```
-.
-├── admin_ui/               FastAPI backend for the customer portal
-│   ├── app.py
-│   └── requirements.txt
-├── docs/                   Architecture and onboarding documentation
-│   ├── system-architecture.md
-│   ├── customer-onboarding.md
-│   └── observability.md
-├── lambdas/                Lambda function source code
-│   ├── processor/          Orchestrator — reads CloudTrail, fans out to stack processors
-│   ├── stack_processor/    Fetches CFn template, calls Bedrock, invokes validator
-│   ├── validator/          Runs cfn-lint, retries with Bedrock up to 3×
-│   ├── pr_creator/         Creates GitHub branch, commits template, opens PR
-│   ├── health_check/       Probes all pipeline components every 5 minutes
-│   └── shared/             Event status lifecycle, packaged into every Lambda
-├── results/                Load test artifacts
-│   ├── report.md           Full load test report
-│   ├── G1–G7_*.png         Performance graphs
-│   ├── *.csv               Raw CloudWatch metric exports
-│   └── scenario_log.json   Per-scenario run log
-├── scripts/
-│   ├── package_lambdas.sh  Packages Lambda functions for deployment
-│   └── load_test/          Load test scripts and graph generation
-├── terraform/
-│   ├── saas/               SaaS-side infrastructure (Lambda, DynamoDB, SQS, EventBridge,
-│   │                       CloudWatch dashboards/alarms, health check)
-│   └── customer/           Customer-side infrastructure (CloudTrail, S3, IAM cross-account role)
-├── tests/
-│   ├── unit/               Unit tests for the pipeline logic (no AWS needed): pytest tests/unit
-│   ├── e2e.py              End-to-end integration tests
-│   └── failure_scenarios/  Dedicated failure scenario scripts
-│       ├── README.md
-│       ├── scenario_1_poison_pill.py
-│       ├── scenario_2_throttle.py
-│       └── scenario_3_az_resilience.py
-├── ui/
-│   └── customer-portal/    React + Vite + Tailwind CSS customer onboarding portal
-├── Dockerfile              Multi-stage build: React frontend + FastAPI backend
-├── .env.example            Environment variable template
-└── .gitignore
-```
+</details>
