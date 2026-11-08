@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 334" width="960" height="334" role="img" aria-label="Throughput rises from 15.9 stacks per minute with 1 drifted stack to 39.5 with 10.">
+<title>Throughput rises from 15.9 stacks per minute with 1 drifted stack to 39.5 with 10.</title>
+<style>
+svg { font-family: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif; }
+.bg     { fill: #ffffff; stroke: #d1d9e0; }
+.ink    { fill: #1f2328; }
+.muted  { fill: #59636e; }
+.halo   { paint-order: stroke; stroke: #ffffff; stroke-width: 5px; stroke-linejoin: round; }
+.region { fill: #64748b; fill-opacity: .05; stroke: #8c959f; stroke-width: 1.5; stroke-dasharray: 3 5; }
+.mono   { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.title  { font-size: 14px; font-weight: 600; }
+.sub    { font-size: 12px; }
+.label  { font-size: 12px; }
+.badge  { font-size: 13px; font-weight: 600; }
+.edge   { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.flow   { stroke-dasharray: 6 7; animation: march 1s linear infinite; }
+@keyframes march { to { stroke-dashoffset: -13; } }
+@media (prefers-color-scheme: dark) {
+  .bg    { fill: #0d1117; stroke: #3d444d; }
+  .ink   { fill: #f0f6fc; }
+  .muted { fill: #9198a1; }
+  .halo  { stroke: #0d1117; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow { animation: none; }
+}
+
+.s1 { fill: #2a78d6; stroke: #2a78d6; }
+.s2 { fill: #eb6834; stroke: #eb6834; }
+.grid { stroke: #e3e6ea; stroke-width: 1; }
+.axis { stroke: #8c959f; stroke-width: 1; }
+.num  { font-variant-numeric: tabular-nums; }
+.hollow { fill: #ffffff; stroke-width: 2; }
+.line { fill: none !important; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dot  { stroke: #ffffff; stroke-width: 2; }
+.grow { transform-box: fill-box; transform-origin: left center; animation: grow .9s cubic-bezier(.2,.7,.2,1) both; }
+.draw { animation: draw 1.4s ease-out both; }
+.fade { animation: fade .5s ease-out both; }
+@keyframes grow { from { transform: scaleX(0); } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes fade { from { opacity: 0; } }
+@media (prefers-color-scheme: dark) {
+  .s1 { fill: #3987e5; stroke: #3987e5; }
+  .s2 { fill: #d95926; stroke: #d95926; }
+  .grid { stroke: #262c34; }
+  .axis { stroke: #6e7681; }
+  .hollow { fill: #0d1117; }
+  .dot { stroke: #0d1117; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grow, .draw, .fade { animation: none; }
+  .draw { stroke-dashoffset: 0 !important; }
+}
+</style>
+<rect class="bg" x="1" y="1" width="958" height="332" rx="14"/>
+<text class="title ink" x="32" y="38">Throughput grows with load</text>
+<text class="sub muted" x="32" y="58">Stacks processed per minute, by number of drifted stacks</text>
+<line class="grid" x1="250.0" y1="78" x2="250.0" y2="298"/>
+<text class="label muted num" x="250.0" y="318" text-anchor="middle">0</text>
+<line class="grid" x1="390.0" y1="78" x2="390.0" y2="298"/>
+<text class="label muted num" x="390.0" y="318" text-anchor="middle">10</text>
+<line class="grid" x1="530.0" y1="78" x2="530.0" y2="298"/>
+<text class="label muted num" x="530.0" y="318" text-anchor="middle">20</text>
+<line class="grid" x1="670.0" y1="78" x2="670.0" y2="298"/>
+<text class="label muted num" x="670.0" y="318" text-anchor="middle">30</text>
+<line class="grid" x1="810.0" y1="78" x2="810.0" y2="298"/>
+<text class="label muted num" x="810.0" y="318" text-anchor="middle">40</text>
+<text class="title ink" x="234" y="98.0" text-anchor="end">1 stack</text>
+<text class="sub muted" x="234" y="114.0" text-anchor="end">T1 Functional</text>
+<path class="s1 grow" stroke="none" style="animation-delay:0.00s" d="M250,89.0 h218.6 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-218.6 z"/>
+<text class="title ink num fade" style="animation-delay:0.70s" x="482.6" y="105.0">15.9</text>
+<text class="title ink" x="234" y="142.0" text-anchor="end">3 stacks</text>
+<text class="sub muted" x="234" y="158.0" text-anchor="end">T2 Scaling</text>
+<path class="s1 grow" stroke="none" style="animation-delay:0.15s" d="M250,133.0 h264.8 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-264.8 z"/>
+<text class="title ink num fade" style="animation-delay:0.85s" x="528.8" y="149.0">19.2</text>
+<text class="title ink" x="234" y="186.0" text-anchor="end">6 stacks</text>
+<text class="sub muted" x="234" y="202.0" text-anchor="end">T5 Security</text>
+<path class="s1 grow" stroke="none" style="animation-delay:0.30s" d="M250,177.0 h430.0 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-430.0 z"/>
+<text class="title ink num fade" style="animation-delay:1.00s" x="694.0" y="193.0">31.0</text>
+<text class="title ink" x="234" y="230.0" text-anchor="end">10 stacks</text>
+<text class="sub muted" x="234" y="246.0" text-anchor="end">T3 Performance</text>
+<path class="s1 grow" stroke="none" style="animation-delay:0.45s" d="M250,221.0 h549.0 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-549.0 z"/>
+<text class="title ink num fade" style="animation-delay:1.15s" x="813.0" y="237.0">39.5</text>
+<text class="title ink" x="234" y="274.0" text-anchor="end">10 stacks + 1 bad tenant</text>
+<text class="sub muted" x="234" y="290.0" text-anchor="end">T4 Failure</text>
+<path class="s1 grow" stroke="none" style="animation-delay:0.60s" d="M250,265.0 h508.4 a4,4 0 0 1 4,4 v14 a4,4 0 0 1 -4,4 h-508.4 z"/>
+<text class="title ink num fade" style="animation-delay:1.30s" x="772.4" y="281.0">36.6</text>
+<line class="axis" x1="250" y1="78" x2="250" y2="298"/>
+</svg>

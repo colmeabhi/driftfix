@@ -431,6 +431,147 @@ def lifecycle():
     d.render()
 
 
+# ── Charts: load test results ─────────────────────────────────────────────────
+# Numbers come from results/report.md (section 3, throughput; section 4a, Bedrock
+# latency). They are drawn once on load rather than looped, so the final state
+# is what a reader sees after scrolling to them.
+
+CHART_CSS = """
+.s1 { fill: #2a78d6; stroke: #2a78d6; }
+.s2 { fill: #eb6834; stroke: #eb6834; }
+.grid { stroke: #e3e6ea; stroke-width: 1; }
+.axis { stroke: #8c959f; stroke-width: 1; }
+.num  { font-variant-numeric: tabular-nums; }
+.hollow { fill: #ffffff; stroke-width: 2; }
+.line { fill: none !important; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dot  { stroke: #ffffff; stroke-width: 2; }
+.grow { transform-box: fill-box; transform-origin: left center; animation: grow .9s cubic-bezier(.2,.7,.2,1) both; }
+.draw { animation: draw 1.4s ease-out both; }
+.fade { animation: fade .5s ease-out both; }
+@keyframes grow { from { transform: scaleX(0); } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes fade { from { opacity: 0; } }
+@media (prefers-color-scheme: dark) {
+  .s1 { fill: #3987e5; stroke: #3987e5; }
+  .s2 { fill: #d95926; stroke: #d95926; }
+  .grid { stroke: #262c34; }
+  .axis { stroke: #6e7681; }
+  .hollow { fill: #0d1117; }
+  .dot { stroke: #0d1117; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .grow, .draw, .fade { animation: none; }
+  .draw { stroke-dashoffset: 0 !important; }
+}
+"""
+
+
+def write_chart(name, height, label, body):
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
+        f'width="{WIDTH}" height="{height}" role="img" aria-label="{label}">',
+        f"<title>{label}</title>",
+        "<style>" + BASE_CSS + CHART_CSS + "</style>",
+        f'<rect class="bg" x="1" y="1" width="{WIDTH - 2}" height="{height - 2}" rx="14"/>',
+        *body,
+        "</svg>",
+    ]
+    (OUT / f"{name}.svg").write_text("\n".join(svg) + "\n")
+    print(f"{name + '.svg':20} chart")
+
+
+def throughput():
+    # (scenario, load, stacks per minute), ordered by load.
+    rows = [
+        ("T1 Functional",  "1 stack",                 15.9),
+        ("T2 Scaling",     "3 stacks",                19.2),
+        ("T5 Security",    "6 stacks",                31.0),
+        ("T3 Performance", "10 stacks",               39.5),
+        ("T4 Failure",     "10 stacks + 1 bad tenant", 36.6),
+    ]
+    x0, x1, top, row_h, bar_h, vmax = 250, 880, 78, 44, 22, 45
+    scale  = (x1 - x0) / vmax
+    bottom = top + row_h * len(rows)
+    body = [
+        '<text class="title ink" x="32" y="38">Throughput grows with load</text>',
+        '<text class="sub muted" x="32" y="58">Stacks processed per minute, by number of drifted stacks</text>',
+    ]
+    for tick in range(0, vmax + 1, 10):
+        x = x0 + tick * scale
+        body.append(f'<line class="grid" x1="{x}" y1="{top}" x2="{x}" y2="{bottom}"/>')
+        body.append(f'<text class="label muted num" x="{x}" y="{bottom + 20}" text-anchor="middle">{tick}</text>')
+    for i, (scenario, load, value) in enumerate(rows):
+        cy = top + row_h * i + row_h / 2
+        w  = round(value * scale, 1)
+        y  = cy - bar_h / 2
+        delay = f"{0.15 * i:.2f}s"
+        body.append(f'<text class="title ink" x="{x0 - 16}" y="{cy - 2}" text-anchor="end">{load}</text>')
+        body.append(f'<text class="sub muted" x="{x0 - 16}" y="{cy + 14}" text-anchor="end">{scenario}</text>')
+        # Square at the baseline, rounded at the data end.
+        body.append(f'<path class="s1 grow" stroke="none" style="animation-delay:{delay}" '
+                    f'd="M{x0},{y} h{w - 4} a4,4 0 0 1 4,4 v{bar_h - 8} a4,4 0 0 1 -4,4 h{-(w - 4)} z"/>')
+        body.append(f'<text class="title ink num fade" style="animation-delay:{0.15 * i + 0.7:.2f}s" '
+                    f'x="{x0 + w + 10}" y="{cy + 5}">{value}</text>')
+    body.append(f'<line class="axis" x1="{x0}" y1="{top}" x2="{x0}" y2="{bottom}"/>')
+    write_chart("throughput", bottom + 36,
+                "Throughput rises from 15.9 stacks per minute with 1 drifted stack to 39.5 with 10.", body)
+
+
+def latency():
+    # (stacks, P50 seconds, P99 seconds). The second 10-stack run (T4) is drawn
+    # as hollow markers so both measurements at that load are visible.
+    runs   = [(1, 1.71, 1.71), (3, 4.61, 7.41), (6, 4.34, 9.66), (10, 5.11, 13.26)]
+    second = (10, 5.28, 14.86)
+    x0, x1, top, bottom, ymax = 80, 760, 96, 330, 16
+    fx = lambda stacks: round(x0 + (stacks - 1) / 9 * (x1 - x0), 1)
+    fy = lambda secs: round(bottom - secs / ymax * (bottom - top), 1)
+
+    body = [
+        '<text class="title ink" x="32" y="38">The typical call stays fast. The slowest calls do not.</text>',
+        '<text class="sub muted" x="32" y="58">Amazon Bedrock response time in seconds, by number of stacks processed in parallel</text>',
+        # Legend
+        '<line class="line s1" x1="32" y1="78" x2="52" y2="78"/><circle class="s1 dot" cx="42" cy="78" r="4.5"/>',
+        '<text class="label ink" x="60" y="82">P50, the typical call</text>',
+        '<line class="line s2" x1="212" y1="78" x2="232" y2="78"/><circle class="s2 dot" cx="222" cy="78" r="4.5"/>',
+        '<text class="label ink" x="240" y="82">P99, the slowest 1%</text>',
+        '<circle class="s2 hollow" cx="400" cy="78" r="4.5"/><circle class="s1 hollow" cx="413" cy="78" r="4.5"/>',
+        '<text class="label ink" x="425" y="82">second run at 10 stacks</text>',
+    ]
+    for tick in range(0, ymax + 1, 4):
+        y = fy(tick)
+        body.append(f'<line class="{"axis" if tick == 0 else "grid"}" x1="{x0}" y1="{y}" x2="{x1}" y2="{y}"/>')
+        body.append(f'<text class="label muted num" x="{x0 - 12}" y="{y + 4}" text-anchor="end">{tick} s</text>')
+    for stacks in (1, 3, 6, 10):
+        body.append(f'<text class="label muted num" x="{fx(stacks)}" y="{bottom + 20}" text-anchor="middle">'
+                    f'{stacks} stack{"s" if stacks > 1 else ""}</text>')
+
+    for cls, col in (("s1", 1), ("s2", 2)):
+        pts    = [(fx(r[0]), fy(r[col])) for r in runs]
+        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
+        d      = "M" + " L".join(f"{x},{y}" for x, y in pts)
+        body.append(f'<path class="line {cls} draw" d="{d}" '
+                    f'stroke-dasharray="{length:.0f}" stroke-dashoffset="{length:.0f}"/>')
+        for i, (x, y) in enumerate(pts):
+            body.append(f'<circle class="{cls} dot fade" style="animation-delay:{0.35 * i:.2f}s" '
+                        f'cx="{x}" cy="{y}" r="5"/>')
+        body.append(f'<circle class="{cls} hollow fade" style="animation-delay:1.4s" '
+                    f'cx="{fx(second[0])}" cy="{fy(second[col])}" r="5"/>')
+
+    # Direct labels: the shared start, each line's end, and the second run's P99.
+    end = fx(10) + 14
+    for x, y, text, anchor in (
+        (fx(1) + 12, fy(1.71) + 16, "1.7 s for both", "start"),
+        (end, fy(13.26) + 5, "P99 13.3 s", "start"),
+        (end, fy(14.86) + 1, "14.9 s on the second run", "start"),
+        (end, fy(5.11) + 12, "P50 5.1 s", "start"),
+    ):
+        body.append(f'<text class="label ink num fade" style="animation-delay:1.5s" '
+                    f'x="{x}" y="{y}" text-anchor="{anchor}">{text}</text>')
+    write_chart("latency", bottom + 40,
+                "Bedrock P50 latency stays near 5 seconds from 3 to 10 parallel stacks, "
+                "while P99 latency climbs from 1.7 seconds at 1 stack to about 14 seconds at 10.", body)
+
+
 if __name__ == "__main__":
-    for build in (drift, flow, architecture, retry, lifecycle, onboarding):
+    for build in (drift, flow, architecture, retry, lifecycle, onboarding, throughput, latency):
         build()
