@@ -150,7 +150,7 @@ A daily batch job can fail in two ways: it can process the same event twice, or 
 
 Failed events are retried on later runs, which is why the Orchestrator reads 72 hours of logs while running every 24 hours.
 
-These rules are defined in [`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py). A step-by-step description of every stage is in [`docs/system-architecture.md`](docs/system-architecture.md).
+These rules are defined in [`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py). A diagram of the complete system and a step-by-step description of every stage are in [`docs/system-architecture.md`](docs/system-architecture.md).
 
 ---
 
