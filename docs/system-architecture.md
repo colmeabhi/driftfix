@@ -17,6 +17,23 @@ The Drift Detector solves this by automatically detecting when a manual change w
 
 ---
 
+## The System at a Glance
+
+<p align="center">
+  <img src="diagrams/system.svg" alt="The complete driftfix system: the customer's AWS account and GitHub repository, and the driftfix account with its four pipeline Lambdas, supporting services, monitoring and onboarding portal" width="100%">
+  <br><em>Every component and how they connect. The dot follows one manual change from the customer's stack to a reviewed pull request.</em>
+</p>
+
+| Area | Components |
+|---|---|
+| Customer side | CloudFormation stacks, CloudTrail with its S3 log bucket, the read-only IAM role, the GitHub repository, and the engineer who reviews pull requests |
+| Pipeline | EventBridge schedule, then the Orchestrator, Stack Processor, Validator, and PR Creator Lambdas |
+| Supporting services | DynamoDB, Amazon Bedrock, the S3 audit bucket, and Secrets Manager |
+| Failure handling and monitoring | SQS dead-letter queue, the Health Check Lambda, and CloudWatch with SNS |
+| Onboarding | The portal on App Runner, built from an image in Amazon ECR |
+
+---
+
 ## Two AWS Accounts
 
 ```

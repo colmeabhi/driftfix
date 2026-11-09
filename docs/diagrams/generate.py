@@ -362,6 +362,79 @@ def architecture():
     d.render()
 
 
+# ── Full system diagram (docs/system-architecture.md) ────────────────────────
+
+def system():
+    d = Diagram("system", 640, "The complete driftfix system: the customer's AWS account and GitHub "
+                               "repository on the left, and on the right the driftfix account with the "
+                               "four pipeline Lambdas, the services they use, monitoring, and the "
+                               "onboarding portal.")
+    h = 54
+    rows = [64, 144, 224, 304, 384, 464, 544]
+    L, A, B = 40, 310, 550                   # column x: customer, Lambdas, services
+    lw, w = 190, 200
+
+    d.region(20, 30, 230, 268, "Customer AWS account")
+    d.region(290, 30, 480, 590, "driftfix AWS account")
+
+    d.box("stacks", L, rows[0], lw, h, "CloudFormation stacks", "changed by hand",        "red")
+    d.box("logs",   L, rows[1], lw, h, "CloudTrail + S3 bucket", "log of every API call", "slate")
+    d.box("role",   L, rows[2], lw, h, "Read-only IAM role",     "needs an ExternalId",   "slate")
+    d.box("gh",     L, rows[4], lw, h, "GitHub repository",      "templates + parameters", "green")
+    d.box("eng",    L, rows[6], lw, h, "Customer engineer",      "reviews and merges",    "amber")
+
+    d.box("cron",   A, rows[0], w, h, "EventBridge",           "daily, 7 AM UTC",          "slate")
+    d.box("orc",    A, rows[1], w, h, "Orchestrator",          "finds manual changes",     "blue", 1)
+    d.box("sp",     A, rows[2], w, h, "Stack Processor",       "one run per stack",        "blue", 2)
+    d.box("val",    A, rows[3], w, h, "Validator",             "runs cfn-lint",            "blue", 3)
+    d.box("pr",     A, rows[4], w, h, "PR Creator",            "commits the fix",          "blue", 4)
+    d.box("dlq",    A, rows[5], w, h, "SQS dead-letter queue", "failed invocations",       "red")
+    d.box("portal", A, rows[6], w, h, "Onboarding portal",     "App Runner: React + FastAPI", "purple")
+
+    d.box("cw",     B, rows[0], w, h, "CloudWatch + SNS",      "dashboards, 17 alarms",    "amber")
+    d.box("ddb",    B, rows[1], w, h, "DynamoDB",              "tenants + event records",  "slate")
+    d.box("llm",    B, rows[2], w, h, "Amazon Bedrock",        "rewrites the template",    "purple")
+    d.box("audit",  B, rows[3], w, h, "S3 audit bucket",       "validated files",          "slate")
+    d.box("sec",    B, rows[4], w, h, "Secrets Manager",       "GitHub tokens",            "slate")
+    d.box("health", B, rows[5], w, h, "Health Check",          "probes every 5 minutes",   "amber")
+    d.box("ecr",    B, rows[6], w, h, "Amazon ECR",            "portal image",             "slate")
+
+    mid = lambda r: rows[r] + h / 2
+    # Customer side
+    d.arrow([(135, rows[0] + h), (135, rows[1] - 6)])
+    d.arrow([(L + lw, mid(1)), (A - 6, mid(1))], label="read logs", at=(270, mid(1) - 8))
+    d.arrow([(A, mid(2) - 10), (L + lw + 6, mid(2) - 10)], label="assume", at=(270, mid(2) - 18))
+    d.arrow([(A, mid(2) + 14), (270, mid(2) + 14), (270, mid(4) - 12), (L + lw + 6, mid(4) - 12)],
+            label="read template", at=(262, 340), anchor="end")
+    d.arrow([(A, mid(4) + 12), (L + lw + 6, mid(4) + 12)], "green", label="open PR", at=(270, mid(4) + 30))
+    d.arrow([(135, rows[4] + h), (135, rows[6] - 6)], "green", label="review", at=(145, 500), anchor="start")
+    d.arrow([(L + lw, mid(6)), (A - 6, mid(6))], label="sign up", at=(270, mid(6) - 8))
+
+    # Pipeline
+    for a, b in ((0, 1), (1, 2), (3, 4)):
+        d.arrow([(A + w / 2, rows[a] + h), (A + w / 2, rows[b] - 6)])
+    d.arrow([(A + 70, rows[2] + h), (A + 70, rows[3] - 6)], label="template", at=(A + 62, rows[3] - 10), anchor="end")
+    d.arrow([(A + 130, rows[3]), (A + 130, rows[2] + h + 6)], "red", label="lint errors",
+            at=(A + 138, rows[3] - 10), anchor="start")
+
+    # Lambdas and the services they use
+    for r in (1, 2, 4):
+        d.arrow([(A + w + 6, mid(r)), (B - 6, mid(r))], both=True)
+    d.arrow([(B, mid(5)), (A + w + 6, mid(5))])          # the health check probes the queue
+    d.arrow([(A + w, mid(3)), (B - 6, mid(3))])
+    d.arrow([(B, mid(6)), (A + w + 6, mid(6))])
+    d.arrow([(B + w, mid(5)), (765, mid(5)), (765, mid(0)), (B + w + 6, mid(0))])
+
+    stop = lambda box, pause, light=True: (*d.center(box), pause, box if light else None)
+    cx = A + w / 2
+    d.journey([
+        stop("stacks", 0.6), stop("logs", 0.6), stop("orc", 0.7), stop("ddb", 0.5), stop("orc", 0.2, False),
+        stop("sp", 0.6), stop("llm", 0.9), stop("sp", 0.3, False), stop("val", 0.7),
+        stop("pr", 0.6), stop("gh", 0.8), stop("eng", 1.2),
+    ], "blue")
+    d.render()
+
+
 # ── Diagram 4: the lint retry loop ────────────────────────────────────────────
 
 def retry():
@@ -573,5 +646,5 @@ def latency():
 
 
 if __name__ == "__main__":
-    for build in (drift, flow, architecture, retry, lifecycle, onboarding, throughput, latency):
+    for build in (drift, flow, architecture, system, retry, lifecycle, onboarding, throughput, latency):
         build()
