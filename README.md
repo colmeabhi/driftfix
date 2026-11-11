@@ -84,6 +84,13 @@ driftfix is multi-tenant. It runs in its own AWS account and reads from each cus
   <br><em>One manual change moving from the customer's account to a pull request.</em>
 </p>
 
+The same system as an AWS architecture diagram, with every service it uses:
+
+<p align="center">
+  <img src="docs/diagrams/aws-architecture.svg" alt="AWS architecture of driftfix, with the customer account, the driftfix account, the four pipeline Lambdas and the services they use" width="100%">
+  <br><em>The full AWS architecture.</em>
+</p>
+
 Three rules keep customers isolated from each other:
 
 | Rule | How it works |
@@ -150,7 +157,7 @@ A daily batch job can fail in two ways: it can process the same event twice, or 
 
 Failed events are retried on later runs, which is why the Orchestrator reads 72 hours of logs while running every 24 hours.
 
-These rules are defined in [`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py). A diagram of the complete system and a step-by-step description of every stage are in [`docs/system-architecture.md`](docs/system-architecture.md).
+These rules are defined in [`lambdas/shared/reconciliation.py`](lambdas/shared/reconciliation.py). A step-by-step description of every stage is in [`docs/system-architecture.md`](docs/system-architecture.md).
 
 ---
 
@@ -332,7 +339,7 @@ driftfix started as a course project. These parts are not ready for production:
 │   └── load_test/          Load test runner and graph generation
 ├── results/                Load test report, graphs G1 to G7, raw metric exports
 ├── docs/                   Architecture, onboarding and observability guides
-│   └── diagrams/           README diagrams and charts, and the script that draws them
+│   └── diagrams/           README diagrams and charts, the AWS icons, and the script that draws them
 ├── Dockerfile              Portal image: React build + FastAPI
 └── .env.example
 ```
