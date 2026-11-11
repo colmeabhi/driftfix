@@ -371,7 +371,13 @@ ICONS = OUT / "icons"
 
 
 def aws():
-    d = Diagram("aws-architecture", 770,
+    """
+    Styled as a consulting exhibit: a headline that states the takeaway, one
+    accent colour reserved for the main path, quiet grey for everything else,
+    and three key points under the figure.
+    """
+    T = 78                                       # height of the headline block
+    d = Diagram("aws-architecture", 964,
                 "AWS architecture of driftfix. The customer's AWS account holds the CloudFormation "
                 "stacks, CloudTrail, an S3 log bucket and a read-only IAM role. The driftfix account "
                 "runs an EventBridge schedule and four Lambda functions that use DynamoDB, Bedrock, "
@@ -379,122 +385,181 @@ def aws():
                 "and an App Runner portal for onboarding. Pull requests go to the customer's GitHub "
                 "repository.")
     d.css.append("""
-.acct  { fill: none; stroke: #232f3e; stroke-width: 1.6; }
-.tab   { fill: #232f3e; }
-.group { fill-opacity: .06; stroke-width: 1.4; stroke-dasharray: 5 4; }
-.tile  { fill: #ffffff; stroke: #d1d9e0; }
-.node  { font-size: 12.5px; font-weight: 600; }
-.nsub  { font-size: 11px; }
-@media (prefers-color-scheme: dark) { .acct { stroke: #8c959f; } .tab { fill: #8c959f; } }
+.h1      { font-size: 21px; font-weight: 650; letter-spacing: -.01em; }
+.h2      { font-size: 13px; }
+.rule    { stroke: #d1d9e0; stroke-width: 1; }
+.acct    { fill: none; stroke: #b6bfc9; stroke-width: 1; }
+.panel   { fill: #64748b; fill-opacity: .06; }
+.hero    { fill: #0b4f9e; fill-opacity: .06; stroke: #0b4f9e; stroke-opacity: .45; stroke-width: 1; }
+.cap     { font-size: 10.5px; font-weight: 700; letter-spacing: .09em; }
+.accent  { fill: #0b4f9e; }
+.tile    { fill: #ffffff; stroke: #d1d9e0; }
+.node    { font-size: 12.5px; font-weight: 600; }
+.nsub    { font-size: 11px; }
+.ln      { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.ln-main { stroke: #0b4f9e; stroke-width: 2.2; }
+.ln-aux  { stroke: #8c959f; stroke-width: 1.2; }
+.ln-back { stroke: #b42318; stroke-width: 1.4; stroke-dasharray: 4 4; }
+.m-main  { fill: #0b4f9e; } .m-aux { fill: #8c959f; } .m-back { fill: #b42318; }
+.big     { font-size: 30px; font-weight: 300; }
+.kp      { font-size: 13.5px; font-weight: 650; }
+.kt      { font-size: 12px; }
+.foot    { font-size: 10.5px; }
+@media (prefers-color-scheme: dark) {
+  .rule { stroke: #30363d; } .acct { stroke: #484f58; }
+  .hero { fill: #58a6ff; stroke: #58a6ff; } .accent, .m-main { fill: #58a6ff; }
+  .ln-main { stroke: #58a6ff; } .ln-back { stroke: #f47067; } .m-back { fill: #f47067; }
+}
 """)
+    for kind in ("main", "aux", "back"):
+        d.defs.append(
+            f'<marker id="m-{kind}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" '
+            f'markerHeight="6.5" orient="auto"><path class="m-{kind}" d="M0,0 L10,5 L0,10 z"/></marker>'
+            f'<marker id="m-{kind}-back" viewBox="0 0 10 10" refX="1.5" refY="5" markerWidth="6.5" '
+            f'markerHeight="6.5" orient="auto"><path class="m-{kind}" d="M10,0 L0,5 L10,10 z"/></marker>')
     used = set()
 
-    def node(box_id, cx, y, icon, title, sub=None, color="blue", tile=False):
+    def line(points, kind="aux", both=False, label=None, at=None, anchor="middle"):
+        path = "M" + " L".join(f"{x},{y}" for x, y in points)
+        start = f' marker-start="url(#m-{kind}-back)"' if both else ""
+        d.back.append(f'<path class="ln ln-{kind}" d="{path}" marker-end="url(#m-{kind})"{start}/>')
+        if label:
+            d.front.append(f'<text class="nsub muted halo" x="{at[0]}" y="{at[1]}" text-anchor="{anchor}">{label}</text>')
+
+    def node(box_id, cx, y, icon, title, sub=None, tile=False, step=None):
         used.add(icon)
-        d.boxes[box_id] = (cx - 31, y - 7, 62, 62, color)          # glow frame around the icon
+        d.boxes[box_id] = (cx - 31, y - 7, 62, 62, "blue")
         if tile:
             d.back.append(f'<rect class="tile" x="{cx - 24}" y="{y}" width="48" height="48" rx="9"/>')
         d.back.append(f'<use href="#icon-{icon}" x="{cx - 24}" y="{y}"/>')
         d.front.append(f'<text class="node ink halo" x="{cx}" y="{y + 64}" text-anchor="middle">{title}</text>')
         if sub:
             d.front.append(f'<text class="nsub muted halo" x="{cx}" y="{y + 79}" text-anchor="middle">{sub}</text>')
+        if step:
+            d.front.append(f'<circle class="accent" cx="{cx - 40}" cy="{y + 24}" r="10"/>')
+            d.front.append(f'<text x="{cx - 40}" y="{y + 28.2}" text-anchor="middle" font-size="11.5" '
+                           f'font-weight="700" fill="#ffffff">{step}</text>')
 
     def account(x, y, w, h, title):
-        tab = 9 + len(title) * 6.9
-        d.back.append(f'<rect class="acct" x="{x}" y="{y}" width="{w}" height="{h}" rx="6"/>')
-        d.back.append(f'<path class="tab" d="M{x},{y + 6} a6,6 0 0 1 6,-6 h{tab} v22 h-{tab + 6} z"/>')
-        d.back.append(f'<text x="{x + 9}" y="{y + 15.5}" font-size="12" font-weight="600" fill="#ffffff">{title}</text>')
+        d.back.append(f'<rect class="acct" x="{x}" y="{y}" width="{w}" height="{h}" rx="4"/>')
+        d.front.append(f'<text class="cap ink" x="{x + 14}" y="{y + 21}">{title.upper()}</text>')
 
-    def group(x, y, w, h, title, color):
-        d.back.append(f'<rect class="group fill-{color} edge-{color}" x="{x}" y="{y}" width="{w}" height="{h}" rx="10"/>')
-        d.front.append(f'<text class="nsub fill-{color}" x="{x + 10}" y="{y + 16}" font-weight="700" '
-                       f'letter-spacing=".03em">{title.upper()}</text>')
+    def panel(x, y, w, h, title, hero=False):
+        d.back.append(f'<rect class="{"hero" if hero else "panel"}" x="{x}" y="{y}" width="{w}" height="{h}" rx="6"/>')
+        d.front.append(f'<text class="cap {"accent" if hero else "muted"}" x="{x + 12}" y="{y + 19}">{title.upper()}</text>')
 
-    R = [84, 196, 308, 420, 532, 658]            # icon top for each row
-    C1, C2, C3, C4 = 378, 548, 718, 868          # column centres inside the driftfix account
+    # Headline
+    d.back.append('<rect class="accent" x="32" y="30" width="4" height="46"/>')
+    d.text(48, 49, "One manual change becomes a reviewed pull request in four serverless stages",
+           "h1 ink", "start")
+    d.text(48, 71, "driftfix on AWS: the customer account, the daily pipeline, and the services behind it",
+           "h2 muted", "start")
+    d.back.append(f'<line class="rule" x1="32" y1="{T + 14}" x2="928" y2="{T + 14}"/>')
+
+    R = [y + T for y in (96, 208, 320, 432, 544, 670)]       # icon top for each row
+    C1, C2, C3, C4 = 388, 552, 718, 866                      # column centres, driftfix account
     mid = lambda r: R[r] + 24
 
-    account(20, 30, 240, 380, "Customer AWS account")
-    account(290, 30, 650, 720, "driftfix AWS account")
-    group(304, 62, 150, 562, "Daily pipeline", "blue")
-    group(474, 172, 150, 452, "Data and AI", "purple")
-    group(644, 172, 284, 340, "Failures and monitoring", "red")
-    group(304, 632, 320, 110, "Customer onboarding", "green")
+    account(32, T + 36, 232, 392, "Customer AWS account")
+    account(296, T + 36, 632, 730, "driftfix AWS account")
+    panel(312, T + 68, 152, 568, "Daily pipeline", hero=True)
+    panel(478, T + 180, 148, 456, "Data and AI")
+    panel(640, T + 180, 274, 344, "Failures and monitoring")
+    panel(312, T + 646, 314, 108, "Customer onboarding")
 
     # Customer side
-    node("stacks", 75, R[0], "cloudformation", "CloudFormation", "stacks, changed by hand", "red")
-    node("trail",  195, R[0], "cloudtrail", "CloudTrail", "records write calls", "slate")
-    node("logs",   195, R[1], "s3", "S3 log bucket", None, "slate")
-    node("role",   195, R[2], "iam-role", "IAM role", "read-only, ExternalId", "slate")
-    node("gh",     140, R[4], "github", "GitHub repository", "templates + parameters", "green", tile=True)
-    node("eng",    140, R[5], "user", "Customer engineer", "reviews and merges", "amber", tile=True)
+    node("stacks", 86, R[0], "cloudformation", "CloudFormation", "changed by hand")
+    node("trail",  204, R[0], "cloudtrail", "CloudTrail", "records write calls")
+    node("logs",   204, R[1], "s3", "S3 log bucket")
+    node("role",   204, R[2], "iam-role", "IAM role", "read-only, ExternalId")
+    node("gh",     148, R[4], "github", "GitHub repository", "templates + parameters", tile=True)
+    node("eng",    148, R[5], "user", "Customer engineer", "reviews and merges", tile=True)
 
     # Pipeline
-    node("cron", C1, R[0], "eventbridge", "EventBridge", "daily, 7 AM UTC", "slate")
-    node("orc",  C1, R[1], "lambda", "1. Orchestrator", "finds manual changes")
-    node("sp",   C1, R[2], "lambda", "2. Stack Processor", "one run per stack")
-    node("val",  C1, R[3], "lambda", "3. Validator", "runs cfn-lint")
-    node("pr",   C1, R[4], "lambda", "4. PR Creator", "commits the fix")
+    node("cron", C1, R[0], "eventbridge", "EventBridge", "daily, 7 AM UTC")
+    node("orc",  C1, R[1], "lambda", "Orchestrator", "finds manual changes", step=1)
+    node("sp",   C1, R[2], "lambda", "Stack Processor", "one run per stack", step=2)
+    node("val",  C1, R[3], "lambda", "Validator", "runs cfn-lint", step=3)
+    node("pr",   C1, R[4], "lambda", "PR Creator", "commits the fix", step=4)
 
     # Data and AI
-    node("ddb",   C2, R[1], "dynamodb", "DynamoDB", "tenants + event records", "purple")
-    node("llm",   C2, R[2], "bedrock", "Amazon Bedrock", "rewrites the template", "purple")
-    node("audit", C2, R[3], "s3", "S3 audit bucket", "validated files", "purple")
-    node("sec",   C2, R[4], "secrets-manager", "Secrets Manager", "GitHub tokens", "purple")
+    node("ddb",   C2, R[1], "dynamodb", "DynamoDB", "tenants + event records")
+    node("llm",   C2, R[2], "bedrock", "Amazon Bedrock", "rewrites the template")
+    node("audit", C2, R[3], "s3", "S3 audit bucket", "validated files")
+    node("sec",   C2, R[4], "secrets-manager", "Secrets Manager", "GitHub tokens")
 
     # Failures and monitoring
-    node("health", C3, R[1], "lambda", "Health Check", "every 5 minutes", "red")
-    node("cw",     C3, R[2], "cloudwatch", "CloudWatch", "dashboards, 17 alarms", "red")
-    node("dlq",    C3, R[3], "sqs", "SQS dead-letter queue", "failed invocations", "red")
-    node("sns",    C4, R[2], "sns", "SNS", "notifications", "red")
+    node("health", C3, R[1], "lambda", "Health Check", "every 5 minutes")
+    node("cw",     C3, R[2], "cloudwatch", "CloudWatch", "dashboards, 17 alarms")
+    node("dlq",    C3, R[3], "sqs", "SQS dead-letter queue", "failed invocations")
+    node("sns",    C4, R[2], "sns", "SNS", "notifications")
 
     # Onboarding
-    node("portal", C1, R[5], "apprunner", "App Runner portal", "React + FastAPI", "green")
-    node("ecr",    C2, R[5], "ecr", "Amazon ECR", "portal image", "green")
+    node("portal", C1, R[5], "apprunner", "App Runner portal", "React + FastAPI")
+    node("ecr",    C2, R[5], "ecr", "Amazon ECR", "portal image")
 
-    H = 30                                         # gap from an icon's centre to an arrow end
-    right = lambda a, b, r, **k: d.arrow([(a + H, mid(r)), (b - H - 2, mid(r))], **k)
-    down  = lambda cx, a, b, **k: d.arrow([(cx, R[a] + 86), (cx, R[b] - 8)], **k)
+    H = 30                                                   # icon centre to arrow end
+    across = lambda a, b, r, kind="aux", **k: line([(a + H, mid(r)), (b - H - 2, mid(r))], kind, **k)
+    down   = lambda cx, a, b, kind="aux", **k: line([(cx, R[a] + 86), (cx, R[b] - 8)], kind, **k)
 
-    # The path of one drift event (blue)
-    right(75, 195, 0, color="blue")
-    down(195, 0, 1, color="blue")
-    right(195, C1, 1, color="blue", label="read logs", at=(275, mid(1) - 8))
-    d.arrow([(C1 - 12, R[2] + 86), (C1 - 12, R[3] - 8)], "blue")
-    down(C1, 1, 2, color="blue")
-    down(C1, 3, 4, color="blue")
-    d.arrow([(C1 - H, mid(4) + 10), (140 + H + 2, mid(4) + 10)], "blue", label="open pull request",
-            at=(260, mid(4) + 27))
-    down(140, 4, 5, color="blue")
+    # Main path
+    across(86, 204, 0, "main")
+    down(204, 0, 1, "main")
+    across(204, C1 - 22, 1, "main", label="read logs", at=(282, mid(1) - 8))
+    down(C1, 1, 2, "main")
+    line([(C1 - 12, R[2] + 86), (C1 - 12, R[3] - 8)], "main")
+    down(C1, 3, 4, "main")
+    line([(C1 - 54, mid(4) + 12), (148 + H + 2, mid(4) + 12)], "main", label="open pull request",
+         at=(262, mid(4) + 29))
+    down(148, 4, 5, "main")
 
     # Retry, schedule, cross-account and GitHub reads
-    d.arrow([(C1 + 12, R[3] - 4), (C1 + 12, R[2] + 90)], "red")
-    d.text(C1 + 24, R[3] - 8, "lint errors", "nsub muted halo", "start")
-    d.arrow([(C1, R[0] + 86), (C1, R[1] - 8)])
-    d.arrow([(C1 - H, mid(2) - 8), (195 + H + 2, mid(2) - 8)], label="assume role", at=(288, mid(2) - 16))
-    d.arrow([(C1 - H, mid(2) + 12), (275, mid(2) + 12), (275, mid(4) - 10), (140 + H + 2, mid(4) - 10)],
-            label="read template", at=(267, R[3] + 30), anchor="end")
-    right(140, C1, 5, label="sign up", at=(260, mid(5) - 8))
+    line([(C1 + 12, R[3] - 4), (C1 + 12, R[2] + 90)], "back")
+    d.text(C1 + 22, R[3] - 8, "lint errors", "nsub muted halo", "start")
+    down(C1, 0, 1)
+    line([(C1 - 54, mid(2) - 12), (204 + H + 2, mid(2) - 12)], label="assume role", at=(282, mid(2) - 20))
+    line([(C1 - 54, mid(2) + 14), (280, mid(2) + 14), (280, mid(4) - 12), (148 + H + 2, mid(4) - 12)],
+         label="read template", at=(272, R[3] + 30), anchor="end")
+    line([(148 + H, mid(5)), (C1 - H - 2, mid(5))], label="sign up", at=(262, mid(5) - 8))
 
     # Lambdas and the services they call
     for r in (1, 2, 4):
-        d.arrow([(C1 + H, mid(r)), (C2 - H - 2, mid(r))], both=True)
-    right(C1, C2, 3)
-    d.arrow([(C2 - H, mid(5)), (C1 + H + 2, mid(5))])
+        line([(C1 + H, mid(r)), (C2 - H - 2, mid(r))], both=True)
+    across(C1, C2, 3)
+    line([(C2 - H, mid(5)), (C1 + H + 2, mid(5))])
 
     # Monitoring
     down(C3, 1, 2)
-    d.arrow([(C3, R[3] - 4), (C3, R[2] + 90)])
-    right(C3, C4, 2, label="alarms", at=((C3 + C4) / 2, mid(2) - 8))
+    line([(C3, R[3] - 4), (C3, R[2] + 90)])
+    across(C3, C4, 2, label="alarms", at=((C3 + C4) / 2, mid(2) - 8))
 
-    # Legend, in the free top-right corner of the driftfix account
-    lx = 660
-    for i, (color, text) in enumerate((("blue", "path of one drift event"),
-                                       ("red", "retry after a cfn-lint failure"),
-                                       ("slate", "supporting call"))):
-        y = 84 + i * 22
-        d.back.append(f'<path class="edge edge-{color} flow" d="M{lx},{y} h34" marker-end="url(#head-{color})"/>')
-        d.text(lx + 46, y + 4, text, "nsub muted", "start")
+    # Legend
+    lx, ly = 660, T + 78
+    for i, (kind, text) in enumerate((("main", "Path of one drift event"),
+                                      ("back", "Retry after a cfn-lint failure"),
+                                      ("aux", "Supporting call"))):
+        y = ly + i * 22
+        d.back.append(f'<path class="ln ln-{kind}" d="M{lx},{y} h30" marker-end="url(#m-{kind})"/>')
+        d.text(lx + 42, y + 4, text, "nsub muted", "start")
+
+    # Key points
+    ky = T + 790
+    d.back.append(f'<line class="rule" x1="32" y1="{ky - 8}" x2="928" y2="{ky - 8}"/>')
+    points = (
+        ("Read-only by design", "One IAM role per customer, assumed", "with an ExternalId for one hour."),
+        ("Self-correcting output", "cfn-lint errors return to the model,", "which retries up to three times."),
+        ("A human decides", "Every fix is a pull request. Nothing", "is merged or deployed automatically."),
+    )
+    for i, (head, l1, l2) in enumerate(points):
+        x = 32 + i * 304
+        if i:
+            d.back.append(f'<line class="rule" x1="{x - 16}" y1="{ky + 8}" x2="{x - 16}" y2="{ky + 62}"/>')
+        d.text(x, ky + 40, f"0{i + 1}", "big accent", "start")
+        d.text(x + 48, ky + 22, head, "kp ink", "start")
+        d.text(x + 48, ky + 41, l1, "kt muted", "start")
+        d.text(x + 48, ky + 57, l2, "kt muted", "start")
+    d.text(32, ky + 86, "Source: driftfix Terraform configuration and Lambda source code. "
+                        "Icons: AWS Architecture Icons.", "foot muted", "start")
 
     for name in sorted(used):
         data = base64.b64encode((ICONS / f"{name}.png").read_bytes()).decode()
