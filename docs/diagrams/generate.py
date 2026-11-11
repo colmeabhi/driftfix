@@ -14,6 +14,7 @@ A diagram is built from three things:
   journey()  a dot that travels a route, pausing at boxes and lighting them up
 """
 
+import base64
 import math
 from pathlib import Path
 
@@ -73,7 +74,7 @@ class Diagram:
     def __init__(self, name, height, label):
         self.name, self.height, self.label = name, height, label
         self.back, self.front = [], []      # shapes and edges / text, drawn above the dots
-        self.css, self.boxes = [], {}
+        self.css, self.boxes, self.defs = [], {}, []
         self.dots, self.glows = [], {}      # glows: (box_id, color) -> [(start, end)]
         self.timed = []                     # (svg, [(start, end)])
         self.clock = 0.0                    # running time; journeys are sequential
@@ -235,7 +236,7 @@ class Diagram:
         )
         parts.append(f"<title>{self.label}</title>")
         parts.append("<style>" + "\n".join(css) + "</style>")
-        parts.append("<defs>" + "".join(markers) + "</defs>")
+        parts.append("<defs>" + "".join(markers) + "".join(self.defs) + "</defs>")
         parts.append(f'<rect class="bg" x="1" y="1" width="{WIDTH - 2}" height="{self.height - 2}" rx="14"/>')
         # Dots go under the text so labels stay readable while a dot is parked on a box.
         parts += self.back + glow_svg + dot_svg + self.front + timed_svg
@@ -362,75 +363,148 @@ def architecture():
     d.render()
 
 
-# ── Full system diagram (docs/system-architecture.md) ────────────────────────
+# ── AWS architecture diagram, with the official service icons ────────────────
+# Icons are the AWS Architecture Icons (and the GitHub mark), stored at 96px in
+# docs/diagrams/icons and embedded in the SVG so it stays a single file.
 
-def system():
-    d = Diagram("system", 640, "The complete driftfix system: the customer's AWS account and GitHub "
-                               "repository on the left, and on the right the driftfix account with the "
-                               "four pipeline Lambdas, the services they use, monitoring, and the "
-                               "onboarding portal.")
-    h = 54
-    rows = [64, 144, 224, 304, 384, 464, 544]
-    L, A, B = 40, 310, 550                   # column x: customer, Lambdas, services
-    lw, w = 190, 200
+ICONS = OUT / "icons"
 
-    d.region(20, 30, 230, 268, "Customer AWS account")
-    d.region(290, 30, 480, 590, "driftfix AWS account")
 
-    d.box("stacks", L, rows[0], lw, h, "CloudFormation stacks", "changed by hand",        "red")
-    d.box("logs",   L, rows[1], lw, h, "CloudTrail + S3 bucket", "log of every API call", "slate")
-    d.box("role",   L, rows[2], lw, h, "Read-only IAM role",     "needs an ExternalId",   "slate")
-    d.box("gh",     L, rows[4], lw, h, "GitHub repository",      "templates + parameters", "green")
-    d.box("eng",    L, rows[6], lw, h, "Customer engineer",      "reviews and merges",    "amber")
+def aws():
+    d = Diagram("aws-architecture", 770,
+                "AWS architecture of driftfix. The customer's AWS account holds the CloudFormation "
+                "stacks, CloudTrail, an S3 log bucket and a read-only IAM role. The driftfix account "
+                "runs an EventBridge schedule and four Lambda functions that use DynamoDB, Bedrock, "
+                "S3 and Secrets Manager, with SQS, CloudWatch and SNS for failures and monitoring, "
+                "and an App Runner portal for onboarding. Pull requests go to the customer's GitHub "
+                "repository.")
+    d.css.append("""
+.acct  { fill: none; stroke: #232f3e; stroke-width: 1.6; }
+.tab   { fill: #232f3e; }
+.group { fill-opacity: .06; stroke-width: 1.4; stroke-dasharray: 5 4; }
+.tile  { fill: #ffffff; stroke: #d1d9e0; }
+.node  { font-size: 12.5px; font-weight: 600; }
+.nsub  { font-size: 11px; }
+@media (prefers-color-scheme: dark) { .acct { stroke: #8c959f; } .tab { fill: #8c959f; } }
+""")
+    used = set()
 
-    d.box("cron",   A, rows[0], w, h, "EventBridge",           "daily, 7 AM UTC",          "slate")
-    d.box("orc",    A, rows[1], w, h, "Orchestrator",          "finds manual changes",     "blue", 1)
-    d.box("sp",     A, rows[2], w, h, "Stack Processor",       "one run per stack",        "blue", 2)
-    d.box("val",    A, rows[3], w, h, "Validator",             "runs cfn-lint",            "blue", 3)
-    d.box("pr",     A, rows[4], w, h, "PR Creator",            "commits the fix",          "blue", 4)
-    d.box("dlq",    A, rows[5], w, h, "SQS dead-letter queue", "failed invocations",       "red")
-    d.box("portal", A, rows[6], w, h, "Onboarding portal",     "App Runner: React + FastAPI", "purple")
+    def node(box_id, cx, y, icon, title, sub=None, color="blue", tile=False):
+        used.add(icon)
+        d.boxes[box_id] = (cx - 31, y - 7, 62, 62, color)          # glow frame around the icon
+        if tile:
+            d.back.append(f'<rect class="tile" x="{cx - 24}" y="{y}" width="48" height="48" rx="9"/>')
+        d.back.append(f'<use href="#icon-{icon}" x="{cx - 24}" y="{y}"/>')
+        d.front.append(f'<text class="node ink halo" x="{cx}" y="{y + 64}" text-anchor="middle">{title}</text>')
+        if sub:
+            d.front.append(f'<text class="nsub muted halo" x="{cx}" y="{y + 79}" text-anchor="middle">{sub}</text>')
 
-    d.box("cw",     B, rows[0], w, h, "CloudWatch + SNS",      "dashboards, 17 alarms",    "amber")
-    d.box("ddb",    B, rows[1], w, h, "DynamoDB",              "tenants + event records",  "slate")
-    d.box("llm",    B, rows[2], w, h, "Amazon Bedrock",        "rewrites the template",    "purple")
-    d.box("audit",  B, rows[3], w, h, "S3 audit bucket",       "validated files",          "slate")
-    d.box("sec",    B, rows[4], w, h, "Secrets Manager",       "GitHub tokens",            "slate")
-    d.box("health", B, rows[5], w, h, "Health Check",          "probes every 5 minutes",   "amber")
-    d.box("ecr",    B, rows[6], w, h, "Amazon ECR",            "portal image",             "slate")
+    def account(x, y, w, h, title):
+        tab = 9 + len(title) * 6.9
+        d.back.append(f'<rect class="acct" x="{x}" y="{y}" width="{w}" height="{h}" rx="6"/>')
+        d.back.append(f'<path class="tab" d="M{x},{y + 6} a6,6 0 0 1 6,-6 h{tab} v22 h-{tab + 6} z"/>')
+        d.back.append(f'<text x="{x + 9}" y="{y + 15.5}" font-size="12" font-weight="600" fill="#ffffff">{title}</text>')
 
-    mid = lambda r: rows[r] + h / 2
+    def group(x, y, w, h, title, color):
+        d.back.append(f'<rect class="group fill-{color} edge-{color}" x="{x}" y="{y}" width="{w}" height="{h}" rx="10"/>')
+        d.front.append(f'<text class="nsub fill-{color}" x="{x + 10}" y="{y + 16}" font-weight="700" '
+                       f'letter-spacing=".03em">{title.upper()}</text>')
+
+    R = [84, 196, 308, 420, 532, 658]            # icon top for each row
+    C1, C2, C3, C4 = 378, 548, 718, 868          # column centres inside the driftfix account
+    mid = lambda r: R[r] + 24
+
+    account(20, 30, 240, 380, "Customer AWS account")
+    account(290, 30, 650, 720, "driftfix AWS account")
+    group(304, 62, 150, 562, "Daily pipeline", "blue")
+    group(474, 172, 150, 452, "Data and AI", "purple")
+    group(644, 172, 284, 340, "Failures and monitoring", "red")
+    group(304, 632, 320, 110, "Customer onboarding", "green")
+
     # Customer side
-    d.arrow([(135, rows[0] + h), (135, rows[1] - 6)])
-    d.arrow([(L + lw, mid(1)), (A - 6, mid(1))], label="read logs", at=(270, mid(1) - 8))
-    d.arrow([(A, mid(2) - 10), (L + lw + 6, mid(2) - 10)], label="assume", at=(270, mid(2) - 18))
-    d.arrow([(A, mid(2) + 14), (270, mid(2) + 14), (270, mid(4) - 12), (L + lw + 6, mid(4) - 12)],
-            label="read template", at=(262, 340), anchor="end")
-    d.arrow([(A, mid(4) + 12), (L + lw + 6, mid(4) + 12)], "green", label="open PR", at=(270, mid(4) + 30))
-    d.arrow([(135, rows[4] + h), (135, rows[6] - 6)], "green", label="review", at=(145, 500), anchor="start")
-    d.arrow([(L + lw, mid(6)), (A - 6, mid(6))], label="sign up", at=(270, mid(6) - 8))
+    node("stacks", 75, R[0], "cloudformation", "CloudFormation", "stacks, changed by hand", "red")
+    node("trail",  195, R[0], "cloudtrail", "CloudTrail", "records write calls", "slate")
+    node("logs",   195, R[1], "s3", "S3 log bucket", None, "slate")
+    node("role",   195, R[2], "iam-role", "IAM role", "read-only, ExternalId", "slate")
+    node("gh",     140, R[4], "github", "GitHub repository", "templates + parameters", "green", tile=True)
+    node("eng",    140, R[5], "user", "Customer engineer", "reviews and merges", "amber", tile=True)
 
     # Pipeline
-    for a, b in ((0, 1), (1, 2), (3, 4)):
-        d.arrow([(A + w / 2, rows[a] + h), (A + w / 2, rows[b] - 6)])
-    d.arrow([(A + 70, rows[2] + h), (A + 70, rows[3] - 6)], label="template", at=(A + 62, rows[3] - 10), anchor="end")
-    d.arrow([(A + 130, rows[3]), (A + 130, rows[2] + h + 6)], "red", label="lint errors",
-            at=(A + 138, rows[3] - 10), anchor="start")
+    node("cron", C1, R[0], "eventbridge", "EventBridge", "daily, 7 AM UTC", "slate")
+    node("orc",  C1, R[1], "lambda", "1. Orchestrator", "finds manual changes")
+    node("sp",   C1, R[2], "lambda", "2. Stack Processor", "one run per stack")
+    node("val",  C1, R[3], "lambda", "3. Validator", "runs cfn-lint")
+    node("pr",   C1, R[4], "lambda", "4. PR Creator", "commits the fix")
 
-    # Lambdas and the services they use
+    # Data and AI
+    node("ddb",   C2, R[1], "dynamodb", "DynamoDB", "tenants + event records", "purple")
+    node("llm",   C2, R[2], "bedrock", "Amazon Bedrock", "rewrites the template", "purple")
+    node("audit", C2, R[3], "s3", "S3 audit bucket", "validated files", "purple")
+    node("sec",   C2, R[4], "secrets-manager", "Secrets Manager", "GitHub tokens", "purple")
+
+    # Failures and monitoring
+    node("health", C3, R[1], "lambda", "Health Check", "every 5 minutes", "red")
+    node("cw",     C3, R[2], "cloudwatch", "CloudWatch", "dashboards, 17 alarms", "red")
+    node("dlq",    C3, R[3], "sqs", "SQS dead-letter queue", "failed invocations", "red")
+    node("sns",    C4, R[2], "sns", "SNS", "notifications", "red")
+
+    # Onboarding
+    node("portal", C1, R[5], "apprunner", "App Runner portal", "React + FastAPI", "green")
+    node("ecr",    C2, R[5], "ecr", "Amazon ECR", "portal image", "green")
+
+    H = 30                                         # gap from an icon's centre to an arrow end
+    right = lambda a, b, r, **k: d.arrow([(a + H, mid(r)), (b - H - 2, mid(r))], **k)
+    down  = lambda cx, a, b, **k: d.arrow([(cx, R[a] + 86), (cx, R[b] - 8)], **k)
+
+    # The path of one drift event (blue)
+    right(75, 195, 0, color="blue")
+    down(195, 0, 1, color="blue")
+    right(195, C1, 1, color="blue", label="read logs", at=(275, mid(1) - 8))
+    d.arrow([(C1 - 12, R[2] + 86), (C1 - 12, R[3] - 8)], "blue")
+    down(C1, 1, 2, color="blue")
+    down(C1, 3, 4, color="blue")
+    d.arrow([(C1 - H, mid(4) + 10), (140 + H + 2, mid(4) + 10)], "blue", label="open pull request",
+            at=(260, mid(4) + 27))
+    down(140, 4, 5, color="blue")
+
+    # Retry, schedule, cross-account and GitHub reads
+    d.arrow([(C1 + 12, R[3] - 4), (C1 + 12, R[2] + 90)], "red")
+    d.text(C1 + 24, R[3] - 8, "lint errors", "nsub muted halo", "start")
+    d.arrow([(C1, R[0] + 86), (C1, R[1] - 8)])
+    d.arrow([(C1 - H, mid(2) - 8), (195 + H + 2, mid(2) - 8)], label="assume role", at=(288, mid(2) - 16))
+    d.arrow([(C1 - H, mid(2) + 12), (275, mid(2) + 12), (275, mid(4) - 10), (140 + H + 2, mid(4) - 10)],
+            label="read template", at=(267, R[3] + 30), anchor="end")
+    right(140, C1, 5, label="sign up", at=(260, mid(5) - 8))
+
+    # Lambdas and the services they call
     for r in (1, 2, 4):
-        d.arrow([(A + w + 6, mid(r)), (B - 6, mid(r))], both=True)
-    d.arrow([(B, mid(5)), (A + w + 6, mid(5))])          # the health check probes the queue
-    d.arrow([(A + w, mid(3)), (B - 6, mid(3))])
-    d.arrow([(B, mid(6)), (A + w + 6, mid(6))])
-    d.arrow([(B + w, mid(5)), (765, mid(5)), (765, mid(0)), (B + w + 6, mid(0))])
+        d.arrow([(C1 + H, mid(r)), (C2 - H - 2, mid(r))], both=True)
+    right(C1, C2, 3)
+    d.arrow([(C2 - H, mid(5)), (C1 + H + 2, mid(5))])
+
+    # Monitoring
+    down(C3, 1, 2)
+    d.arrow([(C3, R[3] - 4), (C3, R[2] + 90)])
+    right(C3, C4, 2, label="alarms", at=((C3 + C4) / 2, mid(2) - 8))
+
+    # Legend, in the free top-right corner of the driftfix account
+    lx = 660
+    for i, (color, text) in enumerate((("blue", "path of one drift event"),
+                                       ("red", "retry after a cfn-lint failure"),
+                                       ("slate", "supporting call"))):
+        y = 84 + i * 22
+        d.back.append(f'<path class="edge edge-{color} flow" d="M{lx},{y} h34" marker-end="url(#head-{color})"/>')
+        d.text(lx + 46, y + 4, text, "nsub muted", "start")
+
+    for name in sorted(used):
+        data = base64.b64encode((ICONS / f"{name}.png").read_bytes()).decode()
+        d.defs.append(f'<image id="icon-{name}" width="48" height="48" href="data:image/png;base64,{data}"/>')
 
     stop = lambda box, pause, light=True: (*d.center(box), pause, box if light else None)
-    cx = A + w / 2
     d.journey([
-        stop("stacks", 0.6), stop("logs", 0.6), stop("orc", 0.7), stop("ddb", 0.5), stop("orc", 0.2, False),
-        stop("sp", 0.6), stop("llm", 0.9), stop("sp", 0.3, False), stop("val", 0.7),
-        stop("pr", 0.6), stop("gh", 0.8), stop("eng", 1.2),
+        stop("stacks", 0.6), stop("trail", 0.5), stop("logs", 0.5), stop("orc", 0.7), stop("ddb", 0.5),
+        stop("orc", 0.2, False), stop("sp", 0.6), stop("llm", 0.9), stop("sp", 0.3, False),
+        stop("val", 0.7), stop("pr", 0.6), stop("gh", 0.8), stop("eng", 1.2),
     ], "blue")
     d.render()
 
@@ -646,5 +720,5 @@ def latency():
 
 
 if __name__ == "__main__":
-    for build in (drift, flow, architecture, system, retry, lifecycle, onboarding, throughput, latency):
+    for build in (drift, flow, architecture, aws, retry, lifecycle, onboarding, throughput, latency):
         build()

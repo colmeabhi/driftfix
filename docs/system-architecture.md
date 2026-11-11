@@ -20,8 +20,8 @@ The Drift Detector solves this by automatically detecting when a manual change w
 ## The System at a Glance
 
 <p align="center">
-  <img src="diagrams/system.svg" alt="The complete driftfix system: the customer's AWS account and GitHub repository, and the driftfix account with its four pipeline Lambdas, supporting services, monitoring and onboarding portal" width="100%">
-  <br><em>Every component and how they connect. The dot follows one manual change from the customer's stack to a reviewed pull request.</em>
+  <img src="diagrams/aws-architecture.svg" alt="AWS architecture of driftfix: the customer's AWS account and GitHub repository, and the driftfix account with its four pipeline Lambdas, supporting services, monitoring and onboarding portal" width="100%">
+  <br><em>The AWS architecture. The dot follows one manual change from the customer's stack to a reviewed pull request.</em>
 </p>
 
 | Area | Components |
