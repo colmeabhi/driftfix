@@ -323,46 +323,6 @@ def onboarding():
     ], box_w=196)
 
 
-# ── Diagram 3: architecture ───────────────────────────────────────────────────
-
-def architecture():
-    d = Diagram("architecture", 510, "driftfix reads CloudTrail logs from the customer's AWS account through "
-                                     "a read-only role, runs four Lambda stages in its own account, and opens "
-                                     "a pull request in the customer's GitHub repository.")
-    d.region(20, 30, 240, 250, "Customer AWS account")
-    d.region(340, 30, 430, 460, "driftfix AWS account")
-
-    h = 64
-    d.box("stacks", 40, 70, 200, h,  "CloudFormation stacks", "someone edits one by hand", "red")
-    d.box("logs",   40, 180, 200, h, "CloudTrail logs",       "in an S3 bucket",           "slate")
-    d.box("cron",   360, 70, 180, h, "EventBridge",           "daily, 7 AM UTC",           "slate")
-    d.box("orc",    360, 180, 180, h, "Orchestrator",         "finds manual changes",      "blue",   1)
-    d.box("ddb",    570, 180, 180, h, "DynamoDB",             "status of every event",     "slate")
-    d.box("sp",     360, 290, 180, h, "Stack Processor",      "one run per stack",         "blue",   2)
-    d.box("llm",    570, 290, 180, h, "Amazon Bedrock",       "rewrites the template",     "purple")
-    d.box("val",    360, 400, 180, h, "Validator",            "runs cfn-lint",             "blue",   3)
-    d.box("pr",     570, 400, 180, h, "PR Creator",           "commits the fix",           "blue",   4)
-    d.box("gh",     810, 400, 130, h, "GitHub",               "customer's repo",           "green")
-
-    d.arrow([(140, 134), (140, 174)], label="every API call", at=(150, 160), anchor="start")
-    d.arrow([(240, 212), (354, 212)], label="read-only role", at=(300, 202))
-    d.arrow([(450, 134), (450, 174)])
-    d.arrow([(546, 212), (564, 212)], both=True)
-    d.arrow([(450, 244), (450, 284)], label="per stack", at=(460, 270), anchor="start")
-    d.arrow([(546, 322), (564, 322)], both=True)
-    d.arrow([(450, 354), (450, 394)])
-    d.arrow([(540, 432), (564, 432)])
-    d.arrow([(750, 432), (804, 432)], "green", label="PR", at=(778, 422))
-
-    stop = lambda box, pause, light=True: (*d.center(box), pause, box if light else None)
-    d.journey([
-        stop("stacks", 0.7), stop("logs", 0.6), stop("orc", 0.7), stop("ddb", 0.5),
-        stop("orc", 0.2, False), stop("sp", 0.6), stop("llm", 0.9), stop("sp", 0.3, False),
-        stop("val", 0.7), stop("pr", 0.6), stop("gh", 1.2),
-    ], "blue")
-    d.render()
-
-
 # ── AWS architecture diagram, with the official service icons ────────────────
 # Icons are the AWS Architecture Icons (and the GitHub mark), stored at 96px in
 # docs/diagrams/icons and embedded in the SVG so it stays a single file.
@@ -785,5 +745,5 @@ def latency():
 
 
 if __name__ == "__main__":
-    for build in (drift, flow, architecture, aws, retry, lifecycle, onboarding, throughput, latency):
+    for build in (drift, flow, aws, retry, lifecycle, onboarding, throughput, latency):
         build()
