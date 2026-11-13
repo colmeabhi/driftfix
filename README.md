@@ -7,24 +7,55 @@ driftfix finds manual changes to AWS infrastructure and opens a pull request tha
   <br><em>From a manual change to a pull request in six steps.</em>
 </p>
 
+## At a glance
+
+| Question | Answer |
+|---|---|
+| What problem does it solve? | Someone changes a cloud resource by hand, and the template in Git no longer matches what is running. This is called drift |
+| What does driftfix do? | It detects the change, asks an LLM to update the template, validates the result, and opens a pull request |
+| What does it never do? | It never changes infrastructure and never merges a pull request. A person always decides |
+| How does it run? | Once a day, as four AWS Lambda functions, for every customer |
+| How well does it work? | In load tests it processed 10 stacks in parallel with no errors and no throttling |
+
 Built by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan Machado. The project was first called the IaC Drift Reconciliation SaaS.
 
 ## Contents
 
-- [The problem](#the-problem)
-- [What driftfix does](#what-driftfix-does)
-- [How it works](#how-it-works)
-- [Customer onboarding](#customer-onboarding)
-- [Test results](#test-results)
-- [Monitoring](#monitoring)
-- [Run it yourself](#run-it-yourself)
-- [Known limitations](#known-limitations)
-- [Reference](#reference)
-- [Team](#team)
+1. [The problem](#1-the-problem)
+2. [The system in one picture](#2-the-system-in-one-picture)
+3. [Follow one change through the system](#3-follow-one-change-through-the-system)
+4. [Design decisions](#4-design-decisions)
+5. [Customer onboarding](#5-customer-onboarding)
+6. [Test results](#6-test-results)
+7. [Monitoring](#7-monitoring)
+8. [Run it yourself](#8-run-it-yourself)
+9. [Common questions](#9-common-questions)
+10. [Known limitations](#10-known-limitations)
+11. [Reference](#11-reference)
+12. [Team](#12-team)
+
+<details>
+<summary>Terms used in this README</summary>
+
+| Term | Meaning |
+|---|---|
+| Infrastructure as Code (IaC) | Describing cloud resources in files that are stored in Git, so that changes are reviewed and repeatable |
+| CloudFormation | The AWS service that creates resources from a template file. A group of resources created together is a stack |
+| Template | The file that describes the resources in a stack |
+| Parameter file | A separate file that supplies values to a template, often one per environment, such as `prod.json` |
+| Drift | A difference between the template and the resources that are running |
+| CloudTrail | The AWS service that records every API call made in an account |
+| cfn-lint | A tool that checks whether a CloudFormation template is valid |
+| Amazon Bedrock | The AWS service that gives access to large language models (LLMs) |
+| Tenant | One customer of driftfix |
+| Dead-letter queue | A queue that holds work that failed, so that it can be inspected |
+| P50 and P99 | P50 is the typical response time. P99 is the response time of the slowest 1% of requests |
+
+</details>
 
 ---
 
-## The problem
+## 1. The problem
 
 Infrastructure as Code works on one assumption: the template in Git describes what is running in the cloud.
 
@@ -35,23 +66,50 @@ That assumption breaks when someone changes a resource by hand. Picture a produc
   <br><em>Git still says t3.large. AWS now runs t3.xlarge.</em>
 </p>
 
-This mismatch is called **drift**. It causes no trouble until the next deploy. CloudFormation then reads the template, sees `t3.large`, and resizes the instance back down. The original problem returns, and the reason is hard to trace.
+This mismatch is drift. It causes no trouble until the next deploy. CloudFormation then reads the template, sees `t3.large`, and resizes the instance back down. The original problem returns, and the reason is hard to trace.
 
 AWS can report that a stack has drifted. It does not write the fix. Someone still has to find what changed, edit the right file, and open a pull request. driftfix automates that work.
 
-## What driftfix does
+---
 
-driftfix runs once a day for each customer and does three things:
+## 2. The system in one picture
 
-1. **Detect.** It reads the customer's CloudTrail logs and finds manual changes to resources that CloudFormation manages.
-2. **Fix.** It sends the template and the CloudTrail events to an LLM on Amazon Bedrock, which returns an updated template.
-3. **Propose.** It validates the result with cfn-lint and opens a pull request that explains the change.
+<p align="center">
+  <img src="docs/diagrams/aws-architecture.svg" alt="AWS architecture of driftfix, with the customer account, the driftfix account, the four pipeline Lambdas and the services they use" width="100%">
+  <br><em>The complete AWS architecture. The moving dot follows one manual change from the customer's stack to a reviewed pull request.</em>
+</p>
 
-driftfix never changes infrastructure and never merges anything. A person reviews each pull request and decides what to do.
+How to read the diagram:
 
-### Example pull request
+| Part of the diagram | What it shows |
+|---|---|
+| Left side | What the customer owns: their AWS account, their GitHub repository, and the engineer who reviews pull requests |
+| Right side | The driftfix AWS account, where all processing happens |
+| Blue arrows | The path of one drift event, from the changed stack to the pull request |
+| Numbers 1 to 4 | The four Lambda functions that make up the pipeline, in the order they run |
+| Grey arrows | Supporting calls, such as reading a token or storing a file |
+| Red dashed arrow | The retry that happens when a generated template fails validation |
 
-For the resize described above, the team that owns the stack would find this pull request the next morning:
+The driftfix account reads from the customer's account through one read-only IAM role. It has no other access.
+
+---
+
+## 3. Follow one change through the system
+
+This section follows the instance resize from section 1 through every step.
+
+| Step | Where | What happens |
+|---|---|---|
+| 1 | Customer's AWS account | An engineer resizes the instance in the console. AWS runs the API call `ModifyInstanceAttribute` |
+| 2 | CloudTrail | CloudTrail records the call and writes it to a log file in the customer's S3 bucket |
+| 3 | EventBridge | At 07:00 UTC the daily schedule starts the Orchestrator |
+| 4 | Orchestrator | It reads the last 72 hours of logs and keeps successful write calls. It skips calls made by CloudFormation itself, so a normal deploy is not treated as drift. It reads the `aws:cloudformation:stack-name` tag on the instance and learns that the instance belongs to the `web` stack |
+| 5 | Stack Processor | It fetches `template.yaml` and the parameter files next to it from GitHub. It sends the files and the CloudTrail event to Amazon Bedrock, which returns an updated `prod.json` |
+| 6 | Validator | It runs cfn-lint on the changed files. They pass |
+| 7 | PR Creator | It commits the change on a `drift/...` branch and opens a pull request |
+| 8 | Customer's GitHub | The team reviews the pull request the next morning |
+
+The pull request looks like this:
 
 > **[Drift] ModifyInstanceAttribute detected on web**
 >
@@ -73,25 +131,11 @@ If the resize was correct, the team merges the pull request and Git matches AWS 
 
 ---
 
-## How it works
+## 4. Design decisions
 
-### Architecture
+Five decisions shape how driftfix behaves. Each one answers a question a careful reader would ask.
 
-driftfix is multi-tenant. It runs in its own AWS account and reads from each customer's account through one read-only IAM role.
-
-<p align="center">
-  <img src="docs/diagrams/architecture.svg" alt="driftfix reads CloudTrail logs from the customer account through a read-only role, runs four Lambda stages, and opens a pull request on GitHub" width="100%">
-  <br><em>One manual change moving from the customer's account to a pull request.</em>
-</p>
-
-The same system as an AWS architecture diagram, with every service it uses:
-
-<p align="center">
-  <img src="docs/diagrams/aws-architecture.svg" alt="AWS architecture of driftfix, with the customer account, the driftfix account, the four pipeline Lambdas and the services they use" width="100%">
-  <br><em>The full AWS architecture.</em>
-</p>
-
-Three rules keep customers isolated from each other:
+### 4.1 How are customers kept separate?
 
 | Rule | How it works |
 |---|---|
@@ -99,20 +143,13 @@ Three rules keep customers isolated from each other:
 | One `ExternalId` per customer | The role can only be assumed with a secret value created at onboarding, so one customer cannot point driftfix at another customer's account |
 | Tokens in Secrets Manager | GitHub tokens are read at runtime and never written to logs or to the database |
 
-### The four stages
+### 4.2 Why does the model receive parameter files?
 
-The pipeline is four Lambda functions. Each one does a single job and then invokes the next.
+The value that drifted is often not in the template. Suppose `template.yaml` contains `InstanceType: !Ref Size` and `prod.json` sets `Size` to `t3.large`. The correct fix is one line in `prod.json`.
 
-| Stage | Job | Details |
-|---|---|---|
-| 1. Orchestrator | Find manual changes | Reads the last 72 hours of CloudTrail logs and keeps successful write calls. Skips changes made by CloudFormation itself, so a normal deploy is not treated as drift. Uses the `aws:cloudformation:stack-name` tag to find the stack that owns each resource |
-| 2. Stack Processor | Write the fix | Runs once per affected stack, in parallel. Fetches the template and its parameter files from GitHub and sends them to Bedrock with the CloudTrail events |
-| 3. Validator | Check the fix | Runs cfn-lint on the model's output |
-| 4. PR Creator | Propose the fix | Commits all changed files in one commit on a `drift/...` branch and opens the pull request |
+A model that sees only the template would write `t3.xlarge` directly into it, which would change every other environment too. driftfix sends both files, and the model returns only the files it changed.
 
-**Why parameter files are included.** The value that drifted is often not in the template. Suppose `template.yaml` contains `InstanceType: !Ref Size` and `prod.json` sets `Size` to `t3.large`. The correct fix is one line in `prod.json`. A model that sees only the template would write `t3.xlarge` directly into it, which would change every other environment too. driftfix sends both files, and the model returns only the files it changed.
-
-### Retrying when the template is invalid
+### 4.3 What happens when the model returns an invalid template?
 
 An LLM sometimes returns a template that is not valid CloudFormation. driftfix handles this as a normal case.
 
@@ -127,7 +164,7 @@ The loop runs at most three times. If the template is still invalid, the events 
 
 Only cfn-lint errors block a template. Warnings are logged and ignored, because many hand-written templates already contain warnings that the model did not introduce.
 
-### Using the model's confidence
+### 4.4 What happens when the model is not sure?
 
 The model returns more than a template. It also returns a summary, a root cause, a confidence score from 0 to 1, and a flag that asks for manual review. driftfix uses these to decide what to do:
 
@@ -139,7 +176,7 @@ The model returns more than a template. It also returns a summary, a root cause,
 
 The threshold is set by the `REVIEW_CONFIDENCE_THRESHOLD` environment variable on the Stack Processor.
 
-### Tracking every event
+### 4.5 How does it avoid losing or repeating work?
 
 A daily batch job can fail in two ways: it can process the same event twice, or it can lose an event that failed. driftfix prevents both by keeping one record per CloudTrail event in DynamoDB.
 
@@ -161,7 +198,7 @@ These rules are defined in [`lambdas/shared/reconciliation.py`](lambdas/shared/r
 
 ---
 
-## Customer onboarding
+## 5. Customer onboarding
 
 Customers sign up through a web portal without help from the driftfix team.
 
@@ -176,9 +213,17 @@ The portal is a React front end ([`ui/customer-portal/`](ui/customer-portal/)) s
 
 ---
 
-## Test results
+## 6. Test results
 
-### Load tests
+| Finding | Evidence |
+|---|---|
+| Lambda scaled with the load | Concurrency matched the number of drifted stacks, from 1 to 10, with no throttles and no errors |
+| The LLM is the bottleneck | Median Bedrock latency stayed between 4 and 5.5 seconds. The slowest 1% of calls grew to between 13.3 and 14.9 seconds at 10 stacks |
+| One broken tenant did not affect the others | With an invalid tenant added, all 10 valid stacks still finished normally |
+| No secrets appeared in the logs | A search of every Lambda log group for credential patterns found no matches |
+| Failures are visible | Three deliberate failures each produced the expected signal in CloudWatch |
+
+### 6.1 Load tests
 
 On 2026-05-04 we ran five scenarios against a real AWS account with 10 CloudFormation stacks. A script created real drift by calling AWS APIs such as `PutBucketEncryption` and `ModifyDBInstance`, and we then started the Orchestrator manually.
 
@@ -190,27 +235,27 @@ On 2026-05-04 we ran five scenarios against a real AWS account with 10 CloudForm
 | T4 Failure | 10 stacks and 1 broken tenant | Does one bad customer block the others? |
 | T5 Security | 6 stacks | Do any secrets appear in the logs? |
 
-**Lambda scaled with the load.** Concurrency matched the number of drifted stacks in every scenario, from 1 to 10, with no throttles and no errors.
+**Throughput.** More drifted stacks meant more Lambdas running in parallel, so throughput rose with load.
 
 <p align="center">
   <img src="docs/diagrams/throughput.svg" alt="Throughput rises from 15.9 stacks per minute with 1 drifted stack to 39.5 with 10" width="100%">
   <br><em>Throughput for each scenario, ordered by load.</em>
 </p>
 
-**The bottleneck is the LLM.** The median Bedrock call (P50) stayed between 4 and 5.5 seconds at every load above one stack. The slowest 1% of calls (P99) grew from 1.7 seconds with one stack to between 13.3 and 14.9 seconds with ten, because parallel requests wait for model capacity.
+**Latency.** The median Bedrock call (P50) stayed steady as load grew. The slowest 1% of calls (P99) did not, because parallel requests wait for model capacity.
 
 <p align="center">
   <img src="docs/diagrams/latency.svg" alt="Bedrock P50 latency stays near 5 seconds while P99 latency climbs to about 14 seconds at 10 parallel stacks" width="100%">
   <br><em>Bedrock latency as the number of parallel stacks increases.</em>
 </p>
 
-**A broken tenant did not affect the others.** In T4 we added a tenant with an invalid IAM role. The Orchestrator logged the error and continued, and all 10 valid stacks finished normally.
+**Isolation.** In T4 we added a tenant with an invalid IAM role. The Orchestrator logged the error and continued.
 
-**No secrets appeared in the logs.** In T5 we searched every Lambda log group for `AKIA`, `ghp_`, `password`, `secret_key`, and `aws_secret`, and found no matches.
+**Security.** In T5 we searched every Lambda log group for `AKIA`, `ghp_`, `password`, `secret_key`, and `aws_secret`.
 
 The full report and the raw CloudWatch exports are in [`results/report.md`](results/report.md).
 
-### Failure tests
+### 6.2 Failure tests
 
 Three scripts in [`tests/failure_scenarios/`](tests/failure_scenarios/) each cause one type of failure and check that the monitoring detects it.
 
@@ -222,7 +267,7 @@ Three scripts in [`tests/failure_scenarios/`](tests/failure_scenarios/) each cau
 
 Each scenario is described in [`tests/failure_scenarios/README.md`](tests/failure_scenarios/README.md).
 
-### Unit tests
+### 6.3 Unit tests
 
 The decision logic in the pipeline has unit tests that run without an AWS account. They cover which events count as drift, when an event is retried, how the model's reply is parsed, the cfn-lint retry loop, and the content of the pull request.
 
@@ -236,7 +281,7 @@ pytest tests/unit
 
 ---
 
-## Monitoring
+## 7. Monitoring
 
 The pipeline runs once a day, so a failure could go unnoticed for many hours. A separate Health Check Lambda runs every 5 minutes. It checks each Lambda function, both DynamoDB tables, the audit bucket, and the dead-letter queue, and publishes a `drift-detector/HealthCheck` metric for each one. A value of `1` means healthy, and `0` triggers an alarm.
 
@@ -250,7 +295,7 @@ There are 17 alarms: 8 for component health and 9 for pipeline behaviour such as
 
 ---
 
-## Run it yourself
+## 8. Run it yourself
 
 You need an AWS account with access to a Bedrock model, Terraform 1.5 or newer, and an S3 bucket for the Lambda zip files.
 
@@ -278,7 +323,22 @@ python docs/diagrams/generate.py
 
 ---
 
-## Known limitations
+## 9. Common questions
+
+| Question | Answer |
+|---|---|
+| Can driftfix change my infrastructure? | No. Its role in your account is read-only, and its only output is a pull request |
+| What access does it need? | Read access to the CloudTrail log bucket, permission to read CloudFormation templates and resource tags, and a GitHub token that can write contents and pull requests on one repository |
+| How is this different from CloudFormation drift detection? | CloudFormation tells you that a stack has drifted. driftfix writes the template change, and the pull request shows who made the manual change and when |
+| Which AWS services can it trace back to a stack? | S3, EC2, RDS, Lambda, IAM roles, SNS, SQS, and DynamoDB. The list is in [`lambdas/processor/stack_resolver.py`](lambdas/processor/stack_resolver.py) |
+| Does it fix Terraform code? | No. It updates CloudFormation templates and their parameter files |
+| How soon does a pull request appear? | After the next daily run at 07:00 UTC |
+| Which model does it use? | Amazon Nova Lite by default. Set `BEDROCK_MODEL_ID` to use another Bedrock model |
+| What if the model is wrong? | Invalid templates are sent back for correction. Low-confidence changes are marked `needs review`. Every change still needs a person to merge it |
+
+---
+
+## 10. Known limitations
 
 driftfix started as a course project. These parts are not ready for production:
 
@@ -291,7 +351,7 @@ driftfix started as a course project. These parts are not ready for production:
 
 ---
 
-## Reference
+## 11. Reference
 
 <details>
 <summary>AWS services used</summary>
@@ -348,7 +408,7 @@ driftfix started as a course project. These parts are not ready for production:
 
 ---
 
-## Team
+## 12. Team
 
 Built by Abhishek Naresh Ahirrao, Kunal Elchipuram, and Ethan Machado.
 
